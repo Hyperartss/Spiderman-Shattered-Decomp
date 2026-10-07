@@ -1,0 +1,23 @@
+# whitelist: ignore everything, then un-ignore only what we author
+*
+
+!.gitignore
+!.gitattributes
+!README.md
+!agent.md
+!MODLOG.md
+!STATUS.md
+!docs/
+!docs/**
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
+!config.toml
+!config.example.toml
+
+# never track these
+/extracted/
+/ghidra/
+/logs/
+/target/

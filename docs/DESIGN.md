@@ -1,139 +1,103 @@
-# DESIGN — Project Setup (Step 0)
+# DESIGN — Walkable first-level geometry (Steps 1–4)
 
-Goal of this step: a working Rust + Bevy project skeleton that is ready to
-run, with the Game A path configurable, and the repo clean under the
-whitelist `.gitignore`. No game data is copied in. No commits.
+Goal (one sentence): load the first level's geometry and let the user walk
+around in it with a plain placeholder character.
 
-## What will be true after this step
+Plan only. Nothing runs until you reply OK. After OK I do exactly one step,
+report numbers from the binary's own log, and wait again.
 
-1. Rust toolchain present via rustup (stable), plus `rust-src` is not needed
-   yet; Bevy will build on stable.
-2. Bevy's Linux system dependencies installed (X11, ALSA, udev, xkbcommon,
-   wayland, OpenSSL dev headers) so `cargo run` can compile Bevy on Linux Mint.
-3. Repo root is a Cargo project (`Cargo.toml`, `src/main.rs`) using Bevy.
-4. `.gitignore` is a whitelist: it ignores everything and un-ignores only
-   source/config/docs we author. `extracted/` and `ghidra/` exist as folders
-   and are explicitly ignored.
-5. `config.toml` at repo root holds the Game A install path (not hardcoded
-   in source). `src/main.rs` parses it and prints the path at startup as the
-   smoke test.
-6. Nothing is committed.
+## Course correction
 
-## Exact commands (to be run on your OK, in order)
+I have been doing format archaeology and burning your time on it. Stopping
+that. The geometry decode is already proven good enough to walk on:
 
-All run from the project root:
-`/home/hyper/Desktop/New Drive Files/WIP/SPider-MAn/Spiderman Shattered Decomp`
+- Level geometry: `0x1388` / `0x1389` sibling pair under `1 > 0x30 > 0x138d >
+  0xbbb`, from `Tutorial010SMA.pak`.
+- Vertex record: 32 bytes, `f32[3]` position at +0, `f32[3]` normal at +12.
+  419 of 427 submeshes have finite bboxes; 121 reach a 1.000 unit-normal
+  score.
+- Index: u16, `0xAAAA` separates submeshes, indices local per submesh, each
+  body a triangle strip with degenerate bridges.
+- The `0x1ff` transform table is real but belongs to a different object —
+  tested and disproved as a submesh transform (369 of 427 submeshes get no
+  transform, and placed submeshes land nowhere near the translations).
 
-### 1) Rust via rustup
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-rustc --version && cargo --version
-```
-Expected: `rustc 1.xx.x (stable)` and a matching `cargo` version.
+**Honest tradeoff:** the geometry is a full city-scale level (~14,000 unit
+span) and I do not have its logical grouping or spawn point. So Step 1
+renders a *playable subset* — the dense cluster a character can stand in —
+not a faithful reconstruction of the level. That is a deliberate choice to get
+you a walkable world now instead of more reverse engineering. Fidelity can be
+improved later if you want it; the engine loop works either way.
 
-### 2) Bevy Linux dependencies (Linux Mint is Ubuntu-based)
-```sh
-sudo apt update
-sudo apt install -y g++ pkg-config libx11-dev libasound2-dev libudev-dev \
-  libxkbcommon-dev libwayland-dev libxkbcommon-x11-0 libxcb1-dev \
-  libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-  libssl-dev libxcursor-dev libxi-dev libxrandr-dev
-```
-Expected: apt finishes with "0 upgraded, ... newly installed" or "already the
-newest version". If Wayland dev packages aren't found by name, that's fine —
-X11 path is what Bevy uses; we'll drop that line.
+## Step 1 — Geometry
 
-### 3) Cargo project
-```sh
-cargo init --name spider-shattered
-```
-Expected: creates `Cargo.toml` and `src/main.rs` (won't overwrite existing
-files since root is our project dir).
+- Rank all 427 submeshes by centroid distance from the dense centre of the
+  level. Keep a cluster sized for a human-scale space. The cutoff is a single
+  named constant in source, logged so the choice is visible and changeable.
+- Decode kept submeshes: strip walk, advance one index per triangle, skip
+  degenerate bridges, alternating winding, double-sided material.
+- Camera outside the subset bounding sphere, one directional light.
+- Log to `logs/geometry.log`: submeshes kept/dropped, vertices, triangles,
+  bbox, subset radius, load time.
 
-Add to `Cargo.toml`:
-```toml
-[dependencies]
-bevy = "0.15"
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-```
-(Version pinned to a real release at build time; if crates.io resolution
-fails, we downgrade `bevy` one minor and retry, and log it in MODLOG.md.)
+Success: a recognizable structure at human scale — floor plus walls or props.
+You confirm from the window.
 
-### 4) Whitelist `.gitignore`
-Replace the current `.gitignore/` directory with a file:
-```sh
-rmdir .gitignore
-```
-Then `.gitignore` contains:
-```gitignore
-# ignore everything
-*
+## Step 2 — Collision
 
-# source we author
-!.gitignore
-!.gitattributes
-!README.md
-!agent.md
-!MODLOG.md
-!STATUS.md
-!docs/
-!docs/**
-!Cargo.toml
-!Cargo.lock
-!src/
-!src/**
-!config.toml
-!config.example.toml
+- **Default: derive collision from Step 1's triangles.** No second format to
+  reverse. A dedicated collision chunk would only replace this if *proven*.
+- Physics: `bevy_rapier3d` matched to Bevy 0.15 — collision events built in,
+  one new dependency, version pin a **guess** until cargo resolves it.
+- Log every contact (collider, world position) to `logs/collision.log`.
+- Success: a capsule dropped from above the bbox lands on geometry and the log
+  shows a contact at a plausible position.
 
-# explicitly never track these two folders
-/extracted/
-/ghidra/
-```
-Also run:
-```sh
-mkdir -p extracted ghidra
-```
-`.gitattributes` stays as-is. Expected: `git status` shows only the source
-files above as untracked; `extracted/` and `ghidra/` never appear.
+## Step 3 — Camera
 
-### 5) Config for the Game A path
-`config.toml`:
-```toml
-game_a_path = "/home/hyper/Desktop/New Drive Files/WIP/SPider-MAn/Spider-Man Shattered Dimensions"
-```
-And `config.example.toml` with a placeholder path. No code reads Game A yet;
-`src/main.rs` only loads the config, prints the path, and opens an empty
-Bevy window/prints engine version as the smoke test. No game files are read
-or copied.
+- Third-person follow camera behind the placeholder capsule.
+- Log camera position and look target at 1 Hz to `logs/player.log`.
+- Success: mouse-look orbits without clipping through the capsule; log shows
+  changing positions.
 
-### 6) Smoke test
-```sh
-cargo run
-```
-Expected: first build takes several minutes (Bevy is large); final lines show
-our printed config path and Bevy starting without a panic. A window may open
-briefly on your session — tell me if you'd rather have headless log-only
-output and I'll adjust `main.rs` to skip creating the window.
+## Step 4 — Movement
+
+- Capsule + gray material, gravity, walk/run, jump. Controls: WASD + mouse +
+  Space.
+- Log at 1 Hz plus on any contact: position, velocity, grounded flag →
+  `logs/player.log`; contacts → `logs/collision.log`.
+- Success: 60 s walk with no falling through the floor and a continuous
+  position trace in the log.
+
+## Defaults (I set these so one OK is enough — say the word to change any)
+
+| decision | default |
+|---|---|
+| level pak | `Tutorial010SMA.pak` (naming convention, evidence not proof) |
+| geometry | filtered playable subset, radius cutoff logged |
+| physics | `bevy_rapier3d` |
+| camera | third-person follow |
+| window | 1280×720 windowed |
+| character model | leave the holed head; level is the goal |
+
+## Ground rules (unchanged)
+
+- Game A read-only. Never write to the install; extract only into
+  `extracted/`; never touch Game B.
+- No game data, payload bytes or game names in tracked files; evidence to
+  `logs/` only. Chunk types as hex.
+- Guesses marked as guesses. Claims only from numbers that prove them.
+- A step that fails twice → update `STATUS.md`, stop, report.
+- No commits unless asked.
+- **Every reported number comes from the shipped binary's log, not a probe.**
+  Two earlier reports were wrong because the Python probe and the Rust binary
+  diverged; see `STATUS.md`.
 
 ## What I will NOT do
 
-- No `git commit`, no staging.
-- No writing to Game A or Game B, no copying game files (extracted/ stays empty).
-- No code beyond the skeleton. The format reader is a later step.
+- No writes to Game A, no extraction outside `extracted/`, no Game B.
+- No commits or staging.
+- No claims about chunk semantics without a supporting number.
+- No step executed before your OK.
 
-## How to check
-
-After I implement, verify with:
-```sh
-cd "/home/hyper/Desktop/New Drive Files/WIP/SPider-MAn/Spiderman Shattered Decomp"
-cargo --version
-ls extracted ghidra
-git status --short        # should list only source files, never game data
-cat config.toml
-cargo run                 # prints the Game A path, then Bevy starts
-```
-
-Reply "OK" and I'll execute steps 1–6. If you want changes (e.g., no window
-popup, different Bevy version, different config filename), say so first.
+Reply OK to start Step 1.
