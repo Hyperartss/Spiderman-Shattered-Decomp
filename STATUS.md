@@ -2,6 +2,49 @@
 
 Read-only on Game A throughout. Nothing committed. Evidence in `logs/` only.
 
+## Level structure — SOLVED (2026-10-08)
+
+The level's `Env_Render` region is fully mapped. This is new information and it
+supersedes the guesswork in the older notes.
+
+Path: `Gen_EnvironmentLibrary (0x30) > GenSub_Resource (0x138D) > Env_Render (0x0BBB)`
+— the same `0x30 > 0x138D > 0xBBB` path the older notes had guessed, now named.
+
+Contents of `Env_Render` in the candidate first-level pak (248 chunks total):
+
+| Chunk | Count | Role |
+|---|---|---|
+| `Octree_InfoHeader` / `Octree_Info` | 1 each | octree header; `Octree_Info` opens with float bounding boxes |
+| `Octree_NodeList` | 1 | 225,600 bytes of spatial node data |
+| `RenderOctree_Prims` | 1 | 64,000 bytes — the drawable primitives |
+| `RenderOctree_PrimIdx` | 1 | 42,048 bytes, max value 999 |
+| `RenderOctree_Obj` | 1 | 3,192 bytes, packed float bboxes |
+| `RenderOctree_Instances` / `InstanceIdx` | 1 each | placed objects |
+| `RenderOctree_MaterialList` | 1 | 628-byte header + 78 materials |
+| `GenSub_VertexList` / `GenSub_IndexList` | 1 each | the actual mesh data |
+
+So the level geometry is **not** a single blob: the octree (`NodeList` + `Prims`)
+decides what is drawn where, and `VertexList`/`IndexList` hold the vertex pool.
+Connecting them is the open question.
+
+## Update — 2026-10-08 (Xbox 360 cross-check)
+
+- The 360 `.pkz` container format is fully decoded there, and its chunk tree
+  uses the same layout as Game A. Game A parsed with **0 problems** and root
+  length == file size - 12 on the character, enemy, candidate-level, main,
+  and one antagonist-level pak. Rough totals per file.
+- Field order confirmed: `u32 id, u16 version, u16 has_children, u32 len`
+  (little-endian on Game A). See docs/FORMAT.md correction. This resolves why
+  the old notes called them just `a`/`b`.
+- Full resource-name index written: `logs/resource_names_all.log`, built by
+  `tools/decode_resource_names.py`. Results: every .pak parses; one
+  character-variant pak gives 1,870 decoded resource names; the biggest paks
+  are the enemy / antagonist-arc / character-variant group (pak filenames
+  withheld per ground rules — see `logs/resource_names_all.log`);
+  level environments are identified by an `Env_Render` (0xBBB) body, e.g.
+  every antagonist `*Main*` level pak.
+- No game data was extracted and no files outside this repo were modified.
+
 ## Summary
 
 Container format solved. Character model decodes but its head block is
@@ -56,7 +99,58 @@ step is stopped and recorded.
   the translation values (`logs/xf_mapping_test.log`). It belongs to a
   different object.
 
-## Failed attempts (level geometry)
+## Level vertex layout — STOPPED, unresolved (2026-10-08)
+
+`Env_Render` structure is now mapped (see above), but the **vertex record layout
+is still not solved**. Per the "fail twice" rule this step is stopped and written
+up rather than guessed at again.
+
+### What is proven
+
+- `0x1388` (vertex) and `0x1389` (index) for the level: 8,100,832 and 837,088 bytes.
+- **The 68-byte stride in this file is disproved for the level.** 68 does not
+  divide 8,100,832 (remainder 60). 32 divides exactly: 253,151 records.
+- **32 bytes is right for models**, proven two independent ways in
+  the candidate first-level pak: four chunks where `len / (max_index+1)` is exactly 32.00
+  and 100% of records have a finite position and a unit normal at +12
+  (chunks of 2080/65, 1952/61, 1280/40, 1280/40 bytes).
+- Index stream: 418,544 `u16`, `0xAAAA` appears 426 times → 415 submeshes.
+  Each submesh is 0-based (min 0 in all first 15 checked).
+
+### Why 32 alone does not explain the level
+
+- Packing submeshes back-to-back at 32-byte stride gives only **6.1%** unit
+  normals overall (406 of 414 submeshes score below 90%). Individually the first
+  few submeshes look perfect at the naive offset (submesh 1 = 100% at 10,240),
+  so the record layout is right but **the submesh→offset mapping is wrong**.
+- The index count cannot account for the buffer: sum of (max_index+1) is 159,521
+  records but the chunk holds 253,151 — a ratio of 1.587. So either there is
+  other data in the chunk, or each submesh has a base offset we have not found.
+- A brute-force search for a clean 48-record run found offset 9216 scoring 100%
+  for *every* submesh, which means the search was finding one long clean region,
+  not a per-submesh start. That test was invalid and should not be trusted.
+
+### Prime suspects for next time
+
+1. `GenSub_VertexList` for a level may be a **pool with base offsets**, not
+   concatenated per-submesh blocks. The index being 0-based per submesh is
+   consistent with a global pool plus a base that is stored elsewhere —
+   possibly in `RenderOctree_Prims` (6,4000 bytes, divides cleanly by 20/32/40)
+   or `Octree_NodeList` (225,600 bytes, opens with float bounding boxes).
+2. The remaining 2,995,392 bytes (93,591 records at 32) may be a second pool,
+   LOD data, or vertex colours/UVs in a wider record.
+3. `RenderOctree_Obj` (3,192 bytes) had `0xFF7FFFFF` sentinels — looks like
+   packed float bounding boxes, possibly the key to the spatial mapping.
+
+### Not to be repeated
+
+- Do not test stride by unit-normal fraction alone. 32, 64, 96 and 128 share byte
+  offsets and all score ~92% for the same records. Always require the stride to
+  divide the length AND cross-check against `len / (max_index+1)`.
+- Do not assume "indices local per submesh" means "submeshes packed
+  consecutively". That assumption is what failed here.
+
+### Earlier failed attempts (level geometry)
 
 Both failed. Stopped here per the "fail twice" rule.
 
@@ -116,8 +210,10 @@ for the model, the level decode and the model decode should share one layout.
   **zero** contact events while a dropped capsule fell from y=103 through the
   whole level to y=-225. Either the geometry is too sparse to catch it or the
   contact event wiring is wrong. Unresolved.
-- Which pak is genuinely "the first level". `Tutorial010SMA` chosen from naming
-  convention, which is evidence, not proof.
+- Which pak is genuinely "the first level". The tutorial-010 candidate was
+  chosen from naming convention, which is evidence, not proof. (The pak
+  filename is withheld from tracked files per the ground rules; it is in
+  `docs/` history and `logs/` if needed.)
 
 ## Process notes
 

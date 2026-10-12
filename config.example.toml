@@ -1,0 +1,3 @@
+# Copy this to config.toml and fill in your own path. config.toml is gitignored.
+# Your own install of the game, used read-only at runtime.
+game_a_path = "<ABSOLUTE PATH TO YOUR PC INSTALL>"

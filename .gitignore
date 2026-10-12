@@ -13,10 +13,12 @@
 !Cargo.lock
 !src/
 !src/**
-!config.toml
 !config.example.toml
 
 # never track these
+# config.toml is machine-specific (absolute path to your install) — copy
+# config.example.toml to config.toml and edit it locally; it stays untracked.
+/config.toml
 /extracted/
 /ghidra/
 /logs/

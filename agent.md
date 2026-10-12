@@ -1,7 +1,8 @@
 # AGENTS.md
 
 ## Project
-Decomp and Rewrite Spider-Man: Shattered Dimensions
+Rust PC port ("Game A") — a decomp and rewrite reading the player's own
+copy of the game at runtime.
 
 ## Hard rules, never break these
 
@@ -60,6 +61,6 @@ Decomp and Rewrite Spider-Man: Shattered Dimensions
 ## Environment
 
 - OS: [Linux Mint]
-- Game A (The PC Game): [Spider-Man Shattered Dimensions] [Build 711768], installed at [/home/hyper/Desktop/New Drive Files/WIP/SPider-MAn/Spider-Man Shattered Dimensions]
-- Game B (The Xbox 360 ISO): [Spider-Man Shattered Dimensions] [260 USA/EUROPE], installed at [/home/hyper/Desktop/New Drive Files/WIP/SPider-MAn/360 Vers]**ONLY USE IF TOLD TOO**
+- Game A (PC): installed at <ABSOLUTE PATH TO YOUR PC INSTALL>
+- Game B (360 image): installed at <ABSOLUTE PATH TO YOUR 360 IMAGE>
 - Agent: [OpenCode]

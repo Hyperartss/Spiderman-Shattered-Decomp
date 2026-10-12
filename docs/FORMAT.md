@@ -10,12 +10,21 @@ into the repo.
 A chunk is:
 
 ```
-u32  type   (4 bytes, little-endian)
-u16  a      (2 bytes, little-endian)
-u16  b      (2 bytes, little-endian)
-u32  len    (4 bytes, little-endian)
+u32  id       (4 bytes, little-endian)
+u16  version  (2 bytes, little-endian)
+u16  has_children (2 bytes, little-endian)
+u32  len      (4 bytes, little-endian)
 [len] payload bytes
 ```
+
+> **Correction, 2026-10-08:** the two `u16` fields after `id` were previously
+> written as just `a` and `b`. From the Xbox 360 data (where the same chunk
+> tree format is used, big-endian) we can now name them. In the 360 maps they
+> always read `version` then `has_children`, and the 360 chunk tree only
+> tiles with exactly that ordering. Game A is little-endian, so the same two
+> fields here are `a = version`, `b = has_children`. Verified against
+> `logs/tree_probe.log` (360) and `logs/resource_names_all.log` (Game A).
+> The old labels `a`/`b` are retained below so earlier log entries still match.
 
 So every chunk has a 12-byte header, then `len` payload bytes. Total chunk
 size is `12 + len`.
@@ -123,7 +132,7 @@ A `0x195` chunk's payload layout:
 ## How to check
 
 ```sh
-cd "/home/hyper/Desktop/New Drive Files/WIP/SPider-MAn/Spiderman Shattered Decomp"
+cd <path to this project>
 
 # DDS magic offset = 28 on every instance, csv of which 758 overlap the 11:
 grep -A3 "=== overlap ===" logs/chunks.log
