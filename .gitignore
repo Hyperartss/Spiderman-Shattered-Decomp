@@ -1,0 +1,46 @@
+# --- Game material: never commit ---
+*.iso
+*.xex
+*.xexp
+*.xbe
+*.pak
+*.pkz
+*.usm
+*.bin
+*.xma
+*.xpr
+assets/
+game/
+extracted/
+dump/
+
+# --- Codegen output (derived from the game binary) ---
+sd360/generated/*
+!sd360/generated/rexglue.cmake
+
+# --- Build output ---
+out/
+build/
+cmake-build-*/
+CMakeUserPresets.json
+
+# --- Toolchain: SDK source clones and prebuilt installs ---
+tools/rexglue-sdk/
+tools/linux-amd64/
+tools/extract-xiso_Linux/
+
+# --- Logs and scratch ---
+logs/
+*.log
+tmp/
+
+# --- Ghidra projects ---
+*.gpr
+*.rep/
+*.lock
+*.lock~
+
+# --- Editors ---
+.vscode/
+.idea/
+*.swp
