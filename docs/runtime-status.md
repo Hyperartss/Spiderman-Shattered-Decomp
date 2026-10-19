@@ -551,6 +551,61 @@ not abort the process, so the event other threads block on
 (`NtWaitForSingleObjectEx` on handle `0xF80EEBC8`, infinite and non-alertable)
 is never signalled, and the game hangs with an empty frame.
 
+## Root cause: the guest writes to a guard/read-only page
+
+ReXGlue guest addresses are **offsets from `base`**, where `base = 0x100000000`.
+The guest arena lives in `/dev/shm/xenia_memory_*` and is not uniformly
+writable — it contains guard and read-only regions:
+
+```
+1a22e0000-1a22f0000 ---s     guard
+1a22f0000-1a2350000 rw-s
+1a2350000-1a2351000 r--s     <-- the faulting page
+1a2351000-1a23b0000 rw-s
+1a23b0000-1a23b1000 r--s
+```
+
+The faulting `this` pointer, guest offset `0xA235027C` (host `0x1A235027C`),
+lands squarely on an **`r--s` page**. The guest is *writing* to it. That is the
+SIGSEGV — not a wild pointer, but a wrong pointer that falls into a guard or
+read-only region.
+
+### Where the bad pointer comes from
+
+Traced five frames back from the faulting store:
+
+```
+sub_820F4E58
+  r30 = *(r1+80)                       <- out-parameter filled by the call below
+  sub_8220C700(r3=r30)  -> sub_82207D78(r3) -> sub_82207840(r3) -> FAULT
+sub_82208A68            <- writes that out-parameter; zeroes it first
+  sub_82081190(r3=24448, r4=9344)       <- allocates 24,448 bytes
+```
+
+`sub_82207840` then does page-align arithmetic on that value
+(`rlwinm` / `+4095` / `& 0xFFFFF000` / subtract) loaded from `r31+15116` and
+`r31+15120`, and the result is the descriptor address it stores to.
+
+The GPU layer reports **zero** warnings or errors, so nothing was rejected on the
+Vulkan side — the guest simply computed an address that is not a valid,
+writable arena offset.
+
+### Two crash sites, both the same shape
+
+`sub_82207840` (recomp.17.cpp:21559) and `sub_82202720` (recomp.29.cpp:21482)
+both die writing a GPU descriptor. Both receive a `this` pointer around
+`0xA2xxxxxx`. Because both are Xenos command-buffer builders doing the same
+kind of address arithmetic, a single upstream cause is likely.
+
+### Candidate causes, in the order AGENTS.md prefers
+
+1. **Bad function boundary** in one of these functions, so codegen split it
+   wrongly and the arithmetic produced a wrong value. Cheapest to test, and the
+   class of bug already seen 13 times in this project with the XEX hotpatch
+   entries.
+2. **A kernel import returning a wrong value**, seeding bad GPU state.
+3. Genuine emulator gap in the Xenos ring-buffer emulation.
+
 ## Where the project stands
 
 | Milestone | State |
