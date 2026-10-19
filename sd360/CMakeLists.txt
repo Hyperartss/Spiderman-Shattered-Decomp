@@ -13,6 +13,7 @@ include(generated/rexglue.cmake)
 # Sources
 set(SD360_SOURCES
     src/main.cpp
+    src/diagnostics.cpp
 )
 
 if(WIN32)
@@ -21,4 +22,7 @@ else()
     add_executable(sd360 ${SD360_SOURCES})
 endif()
 
-rexglue_setup_target(sd360)
+# GPU_PLUGINS xenos: enables Xenos (Xbox 360) GPU emulation. Without it the
+# runtime logs "no GPU emulation loaded (gpu_plugin not set)" and ignores every
+# Vd* kernel call, so nothing is ever presented.
+rexglue_setup_target(sd360 GPU_PLUGINS xenos)

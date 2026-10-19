@@ -16,9 +16,15 @@ class Sd360App : public rex::ReXApp {
         PPCImageConfig));
   }
 
+  // Enable Xenos GPU emulation. Empty gpu_plugin means no GPU emulation, and
+  // the runtime then logs "no GPU emulation loaded (gpu_plugin not set)" and
+  // ignores every Vd* kernel call, so nothing is ever presented.
+  void OnPreSetup(rex::RuntimeConfig& config) override {
+    config.gpu_plugin = "xenos";
+  }
+
   // Override virtual hooks for customization:
   // void OnPostInitLogging() override {}
-  // void OnPreSetup(rex::RuntimeConfig& config) override {}
   // void OnLoadXexImage(std::string& xex_image) override {}
   // void OnPostLoadXexImage() override {}
   // void OnPostSetup() override {}

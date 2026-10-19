@@ -1,6 +1,6 @@
 # Runtime status
 
-First successful **build and launch** of the 360 recompilation.
+Progress log for building and launching the 360 recompilation.
 
 ## Status ladder
 
@@ -8,129 +8,142 @@ First successful **build and launch** of the 360 recompilation.
 | --- | --- |
 | Compiles | **YES** — 0 warnings, 0 errors |
 | Codegen passes | **YES** — 9,564 functions, 0 validation errors |
-| Boots | **PARTIAL** — runtime initialises, spawns threads, traps on first unresolved indirect call |
+| Boots | **PARTIAL** — GPU, audio and pipelines initialise; stops on XEX module lookup |
 | Playable | No |
 
-## Build
-
-| Field | Value |
-| --- | --- |
-| Preset | `linux-amd64-debug` |
-| Compiler | clang 20.1.2 |
-| Steps | 52/52 succeeded |
-| Binary | `sd360`, 43.8 MB ELF x86-64, with debug info |
-| Warnings | **0** |
-
-Built from `tools/linux-amd64` (SDK 0.10.0). See "SDK trap" below.
-
-## Launch
+## Launch invocation
 
 ```
 ./sd360/out/build/linux-amd64-debug/sd360 --game_data_root ./run
 ```
 
-Two argument corrections versus README/AGENTS.md:
+Two corrections versus README/AGENTS.md:
 
 - The data root is **`--game_data_root <path>`**, not a positional argument.
-  A bare positional argument yields `--game_data_root was not provided`.
-- The runtime looks for **`<game_data_root>/default.xex` in lowercase**, but the
-  extracted file is `Default.xex`. On a case-sensitive filesystem this fails.
+- The runtime opens **`<game_data_root>/default.xex` in lowercase**, but the
+  extracted file is `Default.xex`.
 
-Worked around with `run/`, a directory of symlinks into `assets/` that exposes
-`default.xex` plus `Data`, `video`, `AvatarAssetPack`, `nxeart` and
-`$SystemUpdate`. Game files stay read-only, per AGENTS.md rule 1.
+## `run/` must be a hardlink mirror, not symlinks
 
-Runtime libs must sit next to the binary (RUNPATH is `$ORIGIN`):
-`librexruntimed.so` and `libTracyClientd.so` are copied from the SDK.
+This is the subtle one, and it caused a hard failure.
 
-## What happens at boot
+`HostPathDevice::ResolvePath()` (Virtual File System wiki) **walks the host
+directory tree** to build its entry table. An earlier version of `run/` used
+symlinks into `assets/`, so the walker saw a symlink where a directory should
+be and never descended into it. Result:
 
-The runtime gets substantially alive before failing:
-
-- SDL initialises on the x11 driver
-- `Kernel Dispatch` thread starts
-- `XMA Decoder` thread starts (audio path is live)
-- `Audio Worker` thread starts
-- At least 7 `XThread` workers start (XThreadB3..XThreadC7, XThreadD1, D2)
-- Recompiled guest code executes into `xstart`
-
-So this is **not** a load-time failure. Real guest code runs, the thread
-scheduler works, and audio decoding is initialised.
-
-## The fault
-
-`SIGABRT` from `rex::runtime::InvalidFunctionTrap`
-(`src/system/function_dispatcher.cpp:38`), reached from a `bctrl` indirect call:
-
-| Frame | Symbol | Site |
-| --- | --- | --- |
-| 5 | `rex::runtime::InvalidFunctionTrap` | function_dispatcher.cpp:38 |
-| 6 | `sub_8218DD48` | `sd360_recomp.4.cpp:14742` |
-| 7 | `sub_8218DF20` | `sd360_recomp.31.cpp:15018` |
-| 8 | `sub_82200AA8` | `sd360_recomp.23.cpp:20893` |
-| 9 | `sub_821FFBA8` | `sd360_recomp.4.cpp:20712` |
-| 10 | `sub_8218DB18` | `sd360_recomp.40.cpp:14265` |
-| 11 | `xstart` | `sd360_recomp.23.cpp:22944` |
-
-### Faulting address
-
-Read from `PPCContext::last_indirect_target` (offset 332, confirmed by
-compiling `offsetof` against the SDK headers — note this needs C++23 for
-`std::byteswap`):
-
-| Register | Value | Valid? |
-| --- | --- | --- |
-| `lr` | `0x8218DF14` | yes — matches `ctx.lr = 0x8218DF14` in generated code |
-| call target (`ctr`) | **`0x880DCE78`** | **no** |
-
-`0x880DCE78` is outside the XEX image (`0x82222E98` + ~3.6 MB) and outside the
-discovered function range (`0x82080000`–`0x82300280`).
-
-### Reading
-
-This is **not** a missing kernel import. Kernel imports sit at low addresses in
-the image; this target is garbage. The guest dereferenced a function-pointer
-table (vtable-like; the code loads it from offsets `30836`–`30900` of an
-object just before the `bctrl`) and got an unpopulated value.
-
-Most likely one of:
-
-1. A vtable belonging to a class whose implementation was never discovered, so
-   the table was never filled and holds uninitialised data.
-2. An indirect call through a table that is populated at runtime by a module or
-   system initialiser that never ran.
-3. A bad function boundary, so codegen mis-split a function and the vtable
-   built next to it is wrong.
-
-Category 3 is the cheapest to test and is where AGENTS.md says to start
-(prefer fixing boundaries in the TOML over writing overrides).
-
-## SDK trap (worth remembering)
-
-CMake silently selected `~/.local/share/smd-rexglue-sdk` instead of the in-repo
-SDK, because:
-
-- `~/.cmake/packages/rexglue` is CMake's **user package registry**, which
-  outranks normal search paths.
-- `generated/rexglue.cmake` calls `find_package(rexglue 0.10.0)` — a *minimum*,
-  not `EXACT` — so `0.10.0.0-dev.unknown` satisfies it.
-
-That SDK is **release-only**: 2 `.so` files, no `librexruntimed.so`. A Debug
-build cannot link against it.
-
-Fix applied: configure with
-`-Drexglue_DIR="<repo>/tools/linux-amd64/lib/cmake/rexglue"`.
-
-Permanent fix, not yet applied: remove `~/.cmake/packages/rexglue`.
-
-## Next step (Phase 4)
-
-Before changing anything, read the wiki pages AGENTS.md lists — Function
-Overrides, Mid-ASM Hooks, Kernel State & Objects, Codegen Pipeline Overview —
-then take the smallest fixable item. Do not guess TOML keys or SDK APIs.
-
-Repro:
 ```
-./sd360/out/build/linux-amd64-debug/sd360 --game_data_root ./run
+[NtCreateFile] FAILED: path='D:\Data\Streams.dat' -> 0xc000000f
+XamShowDirtyDiscErrorUI called! -> FATAL: Disc Read Error
 ```
-Backtraces: `logs/gdb-backtrace.log`, `logs/gdb-target2.log`.
+
+`Data/Streams.dat` exists and is 1.55 GB; it was simply invisible to the VFS.
+
+Fix: `cp -al assets run` builds a mirror of **real directories containing
+hardlinked files**, plus one extra hardlink `default.xex` -> `Default.xex`.
+Inodes are shared (verified: same inode, link count 2), so this costs
+**zero additional disk** and never writes to the game files, keeping AGENTS.md
+rule 1 intact.
+
+## GPU emulation
+
+Initially every `Vd*` kernel call was dropped:
+
+```
+VdSetGraphicsInterruptCallback: no GPU emulation loaded (gpu_plugin not set)
+```
+
+CMake's `rexglue_setup_target(sd360 GPU_PLUGINS xenos)` only **stages**
+`librexgpu-xenosd.so` next to the binary — plugins are runtime-loaded, never
+linked, so staging alone does nothing. The runtime is told via
+`RuntimeConfig::gpu_plugin` (`runtime.h:70`), which is set by overriding
+`OnPreSetup` in `Sd360App` (`src/sd360_app.h`).
+
+After this the runtime brings up Vulkan (1.3.275), picks the RX 5700 XT, and
+starts creating graphics pipeline states with compiled VS/PS shaders.
+
+## Current blocker: XEX module ordinal 9
+
+The boot path calls, from `sub_8218DD48`:
+
+```
+sub_82220370() -> XexLoadImage(ordinal=9, flags=0, &buf)       -> handle
+sub_82220330() -> XexGetProcedureAddress(handle, ordinal)      -> proc addr
+mtctr <proc addr> ; bctrl
+```
+
+`sub_82220330` is a one-line tail-call wrapper around the kernel import
+`__imp__XexGetProcedureAddress`. Traced with temporary hooks:
+
+```
+XexLoadImage(ordinal=9)                                -> 0x30099000
+XexGetProcedureAddress(handle=0x30099000, ordinal=1)   -> 0x880D0040
+XexGetProcedureAddress(handle=0x30099000, ordinal=2)   -> 0x880DCE78
+```
+
+`0x880DCE78` is what lands in CTR. The runtime reports its function table as
+`code=82080000-82300AEC, image=82000000-82520000`, so `0x880DCE78` is outside
+the image entirely. It is a host-function trampoline the SDK minted, and the
+indirect-call dispatcher cannot resolve it:
+
+```
+Execute(88678BB8): function not in function table
+```
+
+### Why the obvious fixes do not work
+
+1. **`REX_EXPORT_STUB_RETURN(XexGetProcedureAddress, 0)`** — does not take
+   effect. `__imp__XexGetProcedureAddress` is a strong (`T`) symbol in
+   `librexruntimed.so`, so the linker binds the generated call straight to the
+   SDK. `REX_EXPORT` populates the name/ordinal registry; it does not override
+   an already-bound import. Overriding it means patching the SDK.
+2. **Overriding the guest wrapper** `sub_82220330` with `REX_HOOK_RAW` to
+   return NULL *does* work (recompiled code is a weak alias), and it removes
+   the trap — but it converts it into a different fatal:
+
+   ```
+   [FATAL] Call to invalid or unregistered function at guest address 0x00000000
+   ```
+
+   So the guest does **not** tolerate a missing procedure everywhere. Only the
+   call site inside `sub_8218DD48` checks for NULL; another site calls the
+   result unconditionally.
+
+### What this means
+
+The game genuinely requires the exports of whatever module ordinal 9 refers
+to. Stubbing the lookup cannot get past it — the correct answer is to supply
+the real procedures, which means identifying module 9 first.
+
+The disc contains a single XEX, so ordinal 9 is very likely a **system module**
+that a retail disc expects the console kernel to provide, not something
+recoverable from `Default.xex` alone.
+
+## Options
+
+1. **Identify module ordinal 9** (Ghidra, or the XEX module/section table) and
+   implement its exports with `REX_EXPORT`. Most correct, most work.
+2. **SDK patch** so the dispatcher resolves minted host trampolines, letting
+   the current addresses dispatch instead of trapping. Needs approval per
+   AGENTS.md rule 6, and is written into `patches/`.
+3. **Accept the NULL stub** and trace which procedure the game wanted from the
+   `0x0` call site, then work backwards. Cheapest, slowest.
+
+Option 2 is the only one that fixes the class of problem rather than this one
+instance, but it touches the SDK.
+
+## Diagnostics still in the tree
+
+`src/diagnostics.cpp` overrides `sub_82220330` to return NULL and log. It is
+what produces the clean NULL rather than a trap. Remove it when module 9 is
+handled properly.
+
+## Environment notes
+
+- Build with `-Drexglue_DIR=<repo>/tools/linux-amd64/lib/cmake/rexglue`.
+  Without it CMake picks `~/.local/share/smd-rexglue-sdk` via
+  `~/.cmake/packages/rexglue`, which is release-only (no `librexruntimed.so`).
+- Native libs must sit next to the binary (RUNPATH is `$ORIGIN`). With the GPU
+  plugin enabled, CMake stages all three itself.
+- SDK runtime logs go to `sd360/out/build/linux-amd64-debug/logs/sd360_NNN.log`,
+  not stdout. Check there first when a run fails silently.
