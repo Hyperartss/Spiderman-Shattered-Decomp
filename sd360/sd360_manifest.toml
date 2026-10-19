@@ -23,3 +23,28 @@ guest_path = "data/gamelogic.dll"
 file_path = "../assets/Data/GameLogic.dll"
 out_directory_path = "generated/GameLogic"
 includes = []
+
+# Function boundaries codegen's discovery missed.
+#
+# Every one of these is an XEX hotpatch entry: the game patches each function's
+# first instruction into an unconditional branch to a per-region hotpatch stub.
+# Discovery does not treat those as entries, so calling one lands in
+# InvalidFunctionTrap ("Call to invalid or unregistered function").
+#
+# EnumerateHotpatchEntries.java finds the ones Ghidra had already decoded.
+# 0x8824fd98 was found by the runtime instead: code that was never decoded
+# cannot appear in a listing scan. Expect more, one runtime report at a time.
+#
+# size 0x8 covers the hotpatch branch plus its trailing nop. Codegen splits at
+# any entry point it already knows, so an undersized entry is safe.
+[modules.functions]
+0x88212ee0 = { size = 0x8 }
+0x8824fd98 = { size = 0x8 }
+0x88232eb8 = { size = 0x8 }
+0x88238260 = { size = 0x8 }
+0x8824ca80 = { size = 0x8 }
+0x8847e048 = { size = 0x8 }
+0x885d2040 = { size = 0x8 }
+0x885fa7b8 = { size = 0x8 }
+0x8868a0b0 = { size = 0x8 }
+0x0x882166d0 = { size = 0x8 }

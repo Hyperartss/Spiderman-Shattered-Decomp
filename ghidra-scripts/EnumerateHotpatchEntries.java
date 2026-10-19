@@ -1,0 +1,121 @@
+// Enumerate XEX hotpatch function entries, decoding branches from RAW BYTES.
+//
+// The listing-based scan undercounts: code Ghidra never decoded is not in the
+// listing at all, so precisely the functions we are hunting are invisible to
+// it. This walks .text byte by byte instead and decodes PPC64 `b` directly, so
+// nothing depends on prior disassembly.
+//
+// XEX patch scheme: each function's first instruction is patched into an
+// unconditional branch to a hotpatch stub. Those entries are what discovery
+// misses. A stub is identified empirically as a branch target hit many times.
+//
+// Emits TOML [modules.functions] lines to the path given as the first argument.
+
+import ghidra.app.script.GhidraScript;
+import ghidra.program.model.address.Address;
+import ghidra.program.model.mem.Memory;
+import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.listing.*;
+
+import java.io.PrintWriter;
+import java.io.FileWriter;
+import java.util.*;
+
+public class EnumerateHotpatchEntries extends GhidraScript {
+
+    private static final int OPCODE_B = 18;      // PPC `b`
+    private static final long BLR = 0x4E800020L;
+
+    @Override
+    public void run() throws Exception {
+        String[] args = getScriptArgs();
+        String outPath = (args.length > 0) ? args[0] : null;
+        int minStubHits = (args.length > 1) ? Integer.parseInt(args[1]) : 40;
+
+        Memory mem = currentProgram.getMemory();
+        FunctionManager fm = currentProgram.getFunctionManager();
+
+        // textStart/textEnd and raw image of the executable region we can read.
+        Address textStart = null, textEnd = null;
+        for (MemoryBlock b : mem.getBlocks()) {
+            if (b.isExecute() && b.isInitialized()) { textStart = b.getStart(); textEnd = b.getEnd(); break; }
+        }
+        if (textStart == null) { println("no executable block"); return; }
+
+        long start = textStart.getOffset();
+        long end = textEnd.getOffset();
+        int len = (int) (end - start + 1);
+        byte[] buf = new byte[len];
+        mem.getBytes(textStart, buf);
+        println("scanning 0x" + Long.toHexString(start) + " - 0x" + Long.toHexString(end)
+                + " (" + len + " bytes)");
+
+        // Pass 1: decode every `b`, tally targets.
+        Map<Long, Integer> hits = new HashMap<>();
+        Map<Long, Long> sampleSite = new HashMap<>();
+        for (int i = 0; i + 4 <= len; i += 4) {
+            int insn = ((buf[i] & 0xFF) << 24) | ((buf[i+1] & 0xFF) << 16)
+                     | ((buf[i+2] & 0xFF) << 8) | (buf[i+3] & 0xFF);
+            if (((insn >>> 26) & 0x3F) != OPCODE_B) continue;
+            int li = insn & 0x03FFFFFC;
+            if (li == 0) continue;                       // `b .` is a no-op marker
+            int disp = (li << 6) >> 6;                   // sign-extend 26->32
+            long site = start + i;
+            long target = site + disp;
+            hits.merge(target, 1, Integer::sum);
+            sampleSite.putIfAbsent(target, site);
+        }
+        println("distinct branch targets: " + hits.size());
+
+        List<Map.Entry<Long, Integer>> sorted = new ArrayList<>(hits.entrySet());
+        sorted.sort((a, b) -> b.getValue() - a.getValue());
+        println();
+        println("=== TOP TARGETS (hotpatch stubs) ===");
+        for (int i = 0; i < Math.min(10, sorted.size()); i++) {
+            println(String.format("  0x%08X  hits=%d", sorted.get(i).getKey(), sorted.get(i).getValue()));
+        }
+
+        Set<Long> stubs = new HashSet<>();
+        for (Map.Entry<Long, Integer> e : sorted) {
+            if (e.getValue() >= minStubHits) stubs.add(e.getKey());
+        }
+        println("stubs identified: " + stubs.size() + " (>= " + minStubHits + " hits)");
+
+        // Pass 2: every branch to a stub is a hotpatch entry candidate.
+        List<Long> missing = new ArrayList<>();
+        int total = 0;
+        for (int i = 0; i + 4 <= len; i += 4) {
+            int insn = ((buf[i] & 0xFF) << 24) | ((buf[i+1] & 0xFF) << 16)
+                     | ((buf[i+2] & 0xFF) << 8) | (buf[i+3] & 0xFF);
+            if (((insn >>> 26) & 0x3F) != OPCODE_B) continue;
+            int li = insn & 0x03FFFFFC;
+            if (li == 0) continue;
+            int disp = (li << 6) >> 6;
+            long site = start + i;
+            long target = site + disp;
+            if (!stubs.contains(target)) continue;
+            total++;
+            Address a = toAddr(site);
+            if (fm.getFunctionAt(a) == null) missing.add(site);
+        }
+        Collections.sort(missing);
+
+        println();
+        println("=== RESULT ===");
+        println("  hotpatch entry branches total : " + total);
+        println("  already functions             : " + (total - missing.size()));
+        println("  MISSING                       : " + missing.size());
+
+        if (outPath != null && !missing.isEmpty()) {
+            try (PrintWriter w = new PrintWriter(new FileWriter(outPath))) {
+                w.println("# Generated by EnumerateHotpatchEntries.java -- do not hand-edit.");
+                w.println("# Decoded from raw bytes, so this includes code Ghidra never disassembled.");
+                w.println("# size 0x8 covers the hotpatch branch plus its trailing nop.");
+                for (long m : missing) {
+                    w.println(String.format("0x%08x = { size = 0x8 }", m));
+                }
+            }
+            println("written: " + outPath);
+        }
+    }
+}
