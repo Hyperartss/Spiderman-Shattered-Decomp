@@ -72,18 +72,57 @@ last_run_outcome() {
   fi
 }
 
+# Module code ranges, from the runtime log and Ghidra section map. An address
+# must be declared in the table belonging to the binary that contains it:
+# Default.xex at 0x82080000-0x82300AEC, GameLogic.dll at 0x880D0000-0x886B2F5F.
+# Declaring it in the wrong table has no effect and looks like a repeat failure.
+ENTRYPOINT_LO=0x82080000
+ENTRYPOINT_HI=0x82300AEC
+MODULE_LO=0x880D0000
+MODULE_HI=0x886B2F5F
+
+table_for_addr() {
+  local addr=$((16#$1))
+  if (( addr >= ENTRYPOINT_LO && addr <= ENTRYPOINT_HI )); then
+    echo "entrypoint"
+  elif (( addr >= MODULE_LO && addr <= MODULE_HI )); then
+    echo "modules"
+  else
+    echo "unknown"
+  fi
+}
+
+# Table sections must exist before entries can be appended under them.
+ensure_table() {
+  local header="$1"
+  grep -qF "$header" "$MANIFEST" || printf '\n%s\n' "$header" >> "$MANIFEST"
+}
+
 is_declared() {
   grep -qiE "^[[:space:]]*0x?$1[[:space:]]*=" "$MANIFEST"
 }
 
 add_entry() {
   local addr="$1"   # bare hex, no 0x prefix
+  local table
+  table="$(table_for_addr "$addr")"
+  if [ "$table" = "unknown" ]; then
+    echo "  0x$addr is outside both known module ranges; not declaring it."
+    echo "  Ranges: entrypoint 0x$(printf '%x' $ENTRYPOINT_LO)-0x$(printf '%x' $ENTRYPOINT_HI)," \
+         "module 0x$(printf '%x' $MODULE_LO)-0x$(printf '%x' $MODULE_HI)"
+    return 1
+  fi
   if is_declared "$addr"; then
     echo "  0x$addr already declared; nothing to add"
     return 1
   fi
+  if [ "$table" = "modules" ]; then
+    ensure_table "[modules.functions]"
+  else
+    ensure_table "[entrypoint.functions]"
+  fi
   printf '0x%s = { size = 0x8 }\n' "$addr" >> "$MANIFEST"
-  echo "  added 0x$addr"
+  echo "  added 0x$addr to [$table.functions]"
   return 0
 }
 

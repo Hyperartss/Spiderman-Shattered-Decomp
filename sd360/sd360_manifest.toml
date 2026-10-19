@@ -47,3 +47,10 @@ includes = []
 0x885d2040 = { size = 0x8 }
 0x885fa7b8 = { size = 0x8 }
 0x8868a0b0 = { size = 0x8 }
+0x882166D0 = { size = 0x8 }
+
+# Same problem, but in Default.xex rather than GameLogic.dll. Addresses in the
+# entrypoint's range (code 0x82080000-0x82300AEC) belong here, not under
+# [modules.functions].
+[entrypoint.functions]
+0x822B9B50 = { size = 0x8 }
