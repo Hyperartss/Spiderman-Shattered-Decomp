@@ -119,6 +119,38 @@ The disc contains a single XEX, so ordinal 9 is very likely a **system module**
 that a retail disc expects the console kernel to provide, not something
 recoverable from `Default.xex` alone.
 
+### What was ruled out for module 9
+
+The XEX header was parsed directly to see whether ordinal 9 refers to a module
+inside this XEX. The header mixes endianness; reading fields big-endian
+reproduces every value the runtime independently reported, which validates the
+anchors:
+
+| Offset (BE) | Value | Meaning (confirmed) |
+| --- | --- | --- |
+| 0x00 | `XEX2` | magic |
+| 0x2C | `0x82222E98` | kernel module base — matches runtime |
+| 0x30 | `0x00010201` | module section flag |
+| 0x34 | `0x82000000` | image base — matches runtime |
+| 0x94 | `0x00520000` | image size (0x82000000→0x82520000) |
+| 0x9F8 | `0x00080000` | code section offset (+0x80000) |
+
+What could **not** be determined:
+
+- There is no `MZ` or `PE\0\0` signature anywhere in the first 0x2000 bytes, so
+  this XEX does not embed a standard PE header and section count cannot be read
+  the usual way.
+- A 24-byte section-header layout anchored at 0x2C produces self-consistent
+  values for four entries and then garbage, so that layout is wrong. It was not
+  used.
+- `sub_82220370` is a bare `XexLoadImage` wrapper that logs nothing, so the game
+  never names the module it wants.
+
+Conclusion: ordinal 9 semantics need the xexkernel definition of `XexLoadImage`
+or a real XEX parser. Guessing the section layout would be inventing structure,
+which AGENTS.md rule 5 forbids. Ghidra with an XEX loader — already listed as a
+prerequisite in the README for Phase 4 naming — is the practical route.
+
 ## Options
 
 1. **Identify module ordinal 9** (Ghidra, or the XEX module/section table) and
