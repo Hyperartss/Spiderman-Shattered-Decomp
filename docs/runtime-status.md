@@ -336,6 +336,110 @@ ordinal 9's procedures dispatchable. It needs one of:
 Option 1 is the only one that unblocks boot without first reverse-engineering
 the module.
 
+## SOLVED: the module was `game:\Data\GameLogic.dll`
+
+The "module ordinal 9" was a misreading. `XexLoadImage`'s first argument is a
+**module name string**, not an ordinal:
+
+```cpp
+u32 XexLoadImage_entry(mapped_string module_name, u32 module_flags,
+                       u32 min_version, mapped_u32 hmodule_ptr);
+```
+
+`li r4,9` in the generated code is `module_flags`. Reading the name out of
+guest memory (`base + 0x7018FAB0`) gives:
+
+```
+game:\Data\GameLogic.dll
+```
+
+and `assets/Data/GameLogic.dll` (6,692,864 bytes) was sitting in the extracted
+game data the whole time. Codegen only processed `Default.xex`, so the DLL was
+never recompiled and its exports pointed at addresses the dispatcher had no
+functions for.
+
+### 1. Register the module in the manifest
+
+`rexglue init module` is broken — it rejects `--xex-path` even when supplied, so
+the entry was written by hand using the schema taken from the SDK source
+(`src/codegen/manifest.cpp:120-147`, and the exact TOML the CLI emits at
+`src/rexglue/commands/init_command.cpp:331`):
+
+```toml
+[[modules]]
+guest_path = "data/gamelogic.dll"
+file_path = "../assets/Data/GameLogic.dll"
+out_directory_path = "generated/GameLogic"
+includes = []
+```
+
+`guest_path` must be the canonical form produced by `NormalizeGuestPath`
+(`src/system/guest_path.cpp:21`): forward slashes, device prefix stripped,
+lowercased.
+
+Codegen then processes both binaries — **195 files written**, and emits
+`libsd360_GameLogic.so` plus `dll_targets.cmake`.
+
+### 2. The module .so is dlopen'd by bare name
+
+`shared_lib_name` is `projectName + "_" + targetName` = `sd360_GameLogic`
+(`project_recompiler.cpp:500`), and `kernel_state.cpp:762` dlopens that string
+directly. This glibc applies **no** `lib`-prefix or `.so` transform to a bare
+dlopen name — `LD_DEBUG=files` enumerated *no* candidate paths at all.
+
+So the build now also emits a symlink named exactly `sd360_GameLogic`:
+
+```cmake
+add_custom_command(TARGET sd360_GameLogic POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+        $<TARGET_FILE:sd360_GameLogic>
+        $<TARGET_FILE_DIR:sd360_GameLogic>/sd360_GameLogic
+    VERBATIM)
+```
+
+The module is dlopen'd from `librexruntimed.so`, and `DT_RUNPATH` is not
+inherited for dlopen, so launching needs the build dir on the loader path:
+
+```bash
+LD_LIBRARY_PATH="$PWD/sd360/out/build/linux-amd64-debug" \
+  ./sd360/out/build/linux-amd64-debug/sd360 --game_data_root ./run
+```
+
+### Result
+
+```
+[xex] XexLoadImage(name="game:\Data\GameLogic.dll") -> hmodule=0x300A3000
+[xex] XexGetProcedureAddress(hmodule=0x300A3000, ordinal=1) -> 0x82300AEC
+[xex] XexGetProcedureAddress(hmodule=0x300A3000, ordinal=2) -> 0x82300AF0
+```
+
+| | Before | After |
+| --- | --- | --- |
+| hmodule | `0x00000000` | `0x300A3000` |
+| ordinal 1 | `0x880D0040` | `0x82300AEC` |
+| ordinal 2 | `0x880DCE78` | `0x82300AF0` |
+
+The runtime logs:
+
+```
+Registering module: data/gamelogic.dll (code_base=880D0000)
+Module 'data/gamelogic.dll' registered 21046 functions
+```
+
+**`0x880DCE78` is `0x880D0000 + 0xCE78` — inside GameLogic.dll's code.** The
+original addresses were correct all along; they were merely unregistered because
+codegen had never processed the DLL.
+
+## Remaining
+
+```
+[FATAL] Call to invalid or unregistered function at guest address 0x88212EE0
+```
+
+`0x88212EE0` is also inside GameLogic.dll's range (`0x880D0000 + 0x142EE0`), so
+this is a *function codegen did not discover* in the DLL, not a missing module.
+Next step is a function-boundary problem in `GameLogic.dll`.
+
 ## Options
 
 1. **Identify module ordinal 9** (Ghidra, or the XEX module/section table) and

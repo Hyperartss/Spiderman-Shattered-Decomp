@@ -9,3 +9,17 @@ game_root = "../assets"
 file_path = "../assets/Default.xex"
 out_directory_path = "generated/default"
 includes = []
+
+# Guest DLL module. The game calls XexLoadImage("game:\Data\GameLogic.dll") during
+# boot and then resolves ordinals 1 and 2 from it. Without this entry codegen only
+# processed Default.xex, so those exports resolved to addresses the indirect-call
+# dispatcher had no functions for.
+#
+# guest_path is the canonical form of "game:\Data\GameLogic.dll" as produced by
+# NormalizeGuestPath (guest_path.cpp:21): forward slashes, device prefix stripped,
+# lowercased.
+[[modules]]
+guest_path = "data/gamelogic.dll"
+file_path = "../assets/Data/GameLogic.dll"
+out_directory_path = "generated/GameLogic"
+includes = []
