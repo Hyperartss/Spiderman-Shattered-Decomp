@@ -44,3 +44,6 @@ tmp/
 .vscode/
 .idea/
 *.swp
+
+# --- runtime scratch (symlinks into assets/, staged runtime libs) ---
+run/
