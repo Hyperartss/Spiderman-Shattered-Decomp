@@ -501,6 +501,66 @@ boundary (so codegen split them wrongly) or a wrong value returned by some
 kernel import. Both are answerable in Ghidra, which already has `GameLogic.dll`
 and `Default.xex` imported with full analysis.
 
+## Current blocker: bogus GPU descriptor pointer
+
+Traced to a single instruction with full debug info (guest registers are now
+readable, so the PPC context is visible at the fault):
+
+```
+ctx.r1  = 0x705FE620   real stack pointer
+ctx.r11 = 0xA25501FC   the buffer being written
+ctx.r10 = 2609 (0xA31) the value stored
+```
+
+`sub_82207840` (recomp.17.cpp:21559, `stwu r10,4(r11)`) is building **Xenos GPU
+command-buffer descriptors** — the constants `0xA31`, `0x3000000`, `0xC0043C00`
+are all Xenos register values. The write target is not a stack slot; it is the
+descriptor buffer, and `r11` reaches it via:
+
+```
+21381  r11 = r27 + r30
+21464  r9  = r11
+21473  r11 = rot(r10,32) & 0xFFFFFFFF     \
+21481  r11 = r11 + 4095                    | page-align arithmetic on GPU
+21485  r11 = rot(r11) & 0xFFFFF000          | state loaded from r31+15116
+21493  r11 = r11 - r10                    /  and r31+15120
+21539  r11 = r9                            <- becomes the store target
+```
+
+`0xA25501FC` is in **no known region**: the guest arena is at `0x100000000`, the
+XEX image at `0x82000000`-`0x82520000`, the guest stack at `0x705FE620`.
+
+There are **zero** GPU warnings or errors in the run, so the Vulkan/Xenos layer
+never rejected anything — the guest simply computed a descriptor address that
+does not correspond to mapped memory.
+
+### Note on Ghidra's decompile of this function
+
+`Ghidra reports sub_82207840 calling FUN_822be754()` and using its return
+value. **That is a decompiler artifact.** In codegen, `bl 0x822be754` becomes
+`__savegprlr_23` — 0x822BE754 is the standard PowerPC prologue stub, not a game
+function, and it is absent from the generated code entirely. Ghidra models the
+stub as a call that returns `r3`, which poisons everything downstream in the
+listing. The generated C++ is authoritative for this function, not the Ghidra
+listing.
+
+### Why it deadlocks the whole game
+
+The thread holding this descriptor dies of SIGSEGV. A guest-thread SIGSEGV does
+not abort the process, so the event other threads block on
+(`NtWaitForSingleObjectEx` on handle `0xF80EEBC8`, infinite and non-alertable)
+is never signalled, and the game hangs with an empty frame.
+
+## Where the project stands
+
+| Milestone | State |
+| --- | --- |
+| Compiles | YES — 0 warnings |
+| Codegen passes | YES — 9,564 (XEX) + 21,049 (GameLogic.dll) functions |
+| Boots | YES — renders the loading screen |
+| Audio | YES — Beenox intro and credits play |
+| Menu | Blocked by the above crash |
+
 ## Options
 
 1. **Identify module ordinal 9** (Ghidra, or the XEX module/section table) and
