@@ -5,6 +5,7 @@
 #pragma once
 
 #include <rex/rex_app.h>
+#include <rex/cvar.h>
 
 class Sd360App : public rex::ReXApp {
  public:
@@ -22,6 +23,13 @@ class Sd360App : public rex::ReXApp {
   void OnPreSetup(rex::RuntimeConfig& config) override {
     config.gpu_plugin = "xenos";
   }
+
+  // Note: setting vulkan_async_skip_incomplete_frames from
+// rex::cvar::SetFlagByName in this hook has no effect -- the flag is still read
+// as true at present time and frames are still skipped. It is set via the
+// environment in run.sh instead (REX_VULKAN_ASYNC_SKIP_INCOMPLETE_FRAMES=false),
+// which does work, because ApplyEnvironment runs later. Left here as a record of
+// the attempted in-code fix rather than shipping a no-op override.
 
   // Override virtual hooks for customization:
   // void OnPostInitLogging() override {}

@@ -54,3 +54,7 @@ includes = []
 # [modules.functions].
 [entrypoint.functions]
 0x822B9B50 = { size = 0x8 }
+0x822FCB68 = { size = 0x8 }
+0x820CA870 = { size = 0x8 }
+0x82245AC8 = { size = 0x8 }
+0x8223A390 = { size = 0x8 }
