@@ -644,3 +644,43 @@ handled properly.
   plugin enabled, CMake stages all three itself.
 - SDK runtime logs go to `sd360/out/build/linux-amd64-debug/logs/sd360_NNN.log`,
   not stdout. Check there first when a run fails silently.
+## Measured boot state (2026-10-19)
+
+Verified at runtime, not inferred:
+
+- XexLoadImage for both Default.xex and GameLogic.dll completes in ~1s
+  (01:04:10 -> 01:04:11; both module function tables initialised, 21049
+  guest functions registered).
+- The guest calls XexLoadImage exactly once. `recomp.4.cpp:14517` is a single
+  call with a null check and straight-line continuation.
+- Audio plays (XMA decoder, pipewire), so file I/O and the audio path work.
+- The GPU picks the RX 5700 XT, creates pipelines and MSAA colour/depth targets,
+  and presents ~2660 frames at 1120x632 (~35ms apart).
+- The framebuffer the GPU resolves into (guest `0x04445000`, 2867200 bytes) is
+  100% zero for the whole run. The guest issues no draw work.
+
+## Methodological corrections
+
+Three earlier conclusions were wrong and have been discarded. Recording them
+because the failure modes repeat:
+
+1. **Breakpoint-per-block gave a fake slow decrypt.** Setting a breakpoint on
+   `rijndaelDecrypt` traps 418,304 times over a 6.7MB XEX (one trap per 16-byte
+   block), which made the load look like it needed minutes. Uninstrumented it is
+   ~1s. Never measure throughput with a breakpoint on the hot function.
+
+2. **Thread numbers are not stable.** The guest recycles thread slots, so
+   "Thread 13" was a different thread in different runs. Any conclusion keyed to
+   a bare thread index is unreliable; match on thread name at sample time.
+
+3. **grepping the runtime log after a gdb run proves nothing.** gdb stops before
+   delivering SIGSEGV to the program's handler, so the runtime's own fault
+   messages never appear. To get them, `handle SIGSEGV nostop noprint pass`.
+
+Also: the guest arena is a single ~4.5GB file in /dev/shm and is leaked on
+abnormal exit. Stale arenas filled /dev/shm to 9.3G of 16G and silently degraded
+later runs. Clear with `rm -f /dev/shm/xenia_memory_*` when a run ends badly.
+
+Forcing PROT_WRITE over the arena is NOT a workaround. The read-only pages are
+how `EnableAccessCallbacks` traps guest access to GPU-managed memory; forcing
+them writable disables the GPU cache-invalidation trap and renders black.
