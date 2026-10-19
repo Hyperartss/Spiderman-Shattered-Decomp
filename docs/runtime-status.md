@@ -256,6 +256,86 @@ analyzeHeadless ghidra sd360 -process Default.xex -noanalysis \
   -scriptPath ghidra-scripts -postScript ProbeBootPath.java
 ```
 
+## Module ordinal 9 — root cause, established
+
+Ghidra's decompile of `Function_8218DD48` (the boot-path function that traps):
+
+```c
+uVar1  = Function_82220370();              // XexLoadImage
+*param_2 = uVar1;                          // handle -> out-param
+if (uVar1 == 0) return;
+
+uVar2  = Function_82220330(uVar1, 1);      // GetProc(handle, ordinal 1)
+*param_3 = uVar2;                          // stored with NO null check
+
+pcVar3 = Function_82220330(*param_2, 2);  // GetProc(handle, ordinal 2)
+if (pcVar3 != 0) {
+    // 28 consecutive globals 0x82467848..0x824678a4 are pushed
+    pcVar3(...);                           // ordinal 2 IS null-checked
+}
+```
+
+So the two procedures are treated asymmetrically:
+
+- **Ordinal 1** is written to an out-param and used later **without a null
+  check**. Returning NULL for it is what produces
+  `[FATAL] Call to invalid or unregistered function at guest address 0x00000000`.
+- **Ordinal 2** is null-checked immediately and called with a 28-word argument
+  block loaded from `0x82467848`.
+
+This also explains why a NULL stub cannot work: only one of the two call sites
+guards against NULL.
+
+### Why this cannot be fixed from the project
+
+The SDK exposes **no public API to make a host function callable through a
+guest indirect call**:
+
+| API | Location | Purpose |
+| --- | --- | --- |
+| `ResolveIndirectFunction(uint32_t)` | `ppc/func.h:33` | lookup only |
+| `InitializeFunctionTable(...)` | `system/function_dispatcher.h:83` | whole-module setup |
+| `DestroyFunctionTable(...)` | same | teardown |
+
+There is no `RegisterHostFunction` / `AddTrampoline` equivalent. Meanwhile
+`PPCFuncRegistrar` (`ppc/function.h:54`) — what `REX_EXPORT` uses — only appends
+`(name, host_function_pointer)` to a vector:
+
+```cpp
+struct PPCFuncRegistrar {
+  PPCFuncRegistrar(const char* name, PPCFunc* func) {
+    GetPPCFuncRegistry().emplace_back(name, func);
+  }
+};
+```
+
+It stores **host pointers keyed by name**. The dispatcher resolves **guest
+addresses**. Nothing bridges the two, which is precisely why
+`XexGetProcedureAddress` hands back `0x880DCE78`/`0x880D0040` — guest addresses
+the dispatcher has never been told about.
+
+Overriding the import itself is also closed off: `__imp__XexGetProcedureAddress`
+is a strong (`T`) symbol in `librexruntimed.so`, so the linker binds the
+generated call straight to the SDK.
+
+### Conclusion
+
+This is an SDK integration gap, not a project bug. Nothing in `sd360` can make
+ordinal 9's procedures dispatchable. It needs one of:
+
+1. **Dispatcher patch** — register minted host trampolines so
+   `ResolveIndirectFunction` can find them. Fixes the whole class. Needs
+   approval per AGENTS.md rule 6.
+2. **Module 9 identified and implemented** — determine what module ordinal 9 is
+   (its ordinal-2 procedure takes a 28-word argument block during graphics
+   setup, which suggests a device/graphics interface module) and supply real
+   implementations via `REX_EXPORT`.
+3. **Return NULL for unresolvable ordinals** — makes the failure clean instead
+   of trapping, but does not unblock boot; the game needs these procedures.
+
+Option 1 is the only one that unblocks boot without first reverse-engineering
+the module.
+
 ## Options
 
 1. **Identify module ordinal 9** (Ghidra, or the XEX module/section table) and
