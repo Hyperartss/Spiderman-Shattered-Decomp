@@ -47,3 +47,7 @@ tmp/
 
 # --- runtime scratch (symlinks into assets/, staged runtime libs) ---
 run/
+
+# Ghidra install + projects (large, regenerable)
+ghidra/
+tools/ghidra_*/

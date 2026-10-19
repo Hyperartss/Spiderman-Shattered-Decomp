@@ -151,6 +151,34 @@ or a real XEX parser. Guessing the section layout would be inventing structure,
 which AGENTS.md rule 5 forbids. Ghidra with an XEX loader — already listed as a
 prerequisite in the README for Phase 4 naming — is the practical route.
 
+## Ghidra status
+
+Ghidra is installed and working headless, but the XEX loader does not register.
+
+Setup that succeeded:
+- `openjdk-21-jdk` installed. The pre-existing OpenJDK was a **JRE** (`java` but
+  no `javac`), which is why Ghidra reported "unsupported java version" — a
+  misleading message, since `application.java.min=21` and 21 is fine.
+- Ghidra 12.1.4 copied from Old stuff into `tools/ghidra_12.1.4_PUBLIC`. The
+  original was **not** modified (mtime unchanged).
+- `zeroKilo/XEXLoaderWV` 12.1.3 unpacked into `Ghidra/Extensions/XEXLoaderWV`,
+  alongside the built-in `Eclipse`/`Ghidra`/`IDAPro` extension directories.
+
+What still fails:
+- Import reports `No load spec found for import file: Default.xex`.
+- Naming the loader explicitly gives
+  `InvalidInputException: Invalid loader name specified: xexloaderwv.XEXLoaderWVLoader`,
+  so the extension is not being registered at all.
+- `analyzeHeadless` logs no error or version warning about the extension; the
+  class searcher simply does not pick it up.
+- No 12.1.4 build of XEXLoaderWV exists (newest published is 12.1.3), so a
+  version-gated build would mean installing Ghidra 12.1.3 instead.
+
+Note: Ghidra would not answer the module-9 question anyway. That is
+`XexLoadImage` ordinal semantics, not game code. Ghidra's value here is naming
+functions and reading the boot path in Phase 4 — real, but a side quest that
+does not unblock the current blocker.
+
 ## Options
 
 1. **Identify module ordinal 9** (Ghidra, or the XEX module/section table) and
