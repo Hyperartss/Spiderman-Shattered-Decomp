@@ -52,3 +52,6 @@ run/
 ghidra/
 tools/ghidra_*/
 tools/ghidra-mcp/
+
+# JDK used only for headless Ghidra (large binaries, regenerable)
+tools/jdk21/
