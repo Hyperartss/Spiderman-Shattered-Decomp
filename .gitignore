@@ -51,3 +51,4 @@ run/
 # Ghidra install + projects (large, regenerable)
 ghidra/
 tools/ghidra_*/
+tools/ghidra-mcp/

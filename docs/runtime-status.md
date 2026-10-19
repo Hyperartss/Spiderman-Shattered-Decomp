@@ -179,6 +179,83 @@ Note: Ghidra would not answer the module-9 question anyway. That is
 functions and reading the boot path in Phase 4 — real, but a side quest that
 does not unblock the current blocker.
 
+## Ghidra status: WORKING
+
+Ghidra 12.1.4 plus the `zeroKilo/XEXLoaderWV` XEX loader now import and
+analyse the XEX. Analysis succeeded (7,552 functions; PNG "invalid data"
+warnings are benign embedded-icon misdetections).
+
+**Why the loader failed before:** extensions must be installed in the *user*
+extension directory, not the Ghidra install directory:
+
+```
+~/.config/ghidra/ghidra_12.1.4_PUBLIC/Extensions/XEXLoaderWV
+```
+
+Installing into `ghidra_12.1.4_PUBLIC/Extensions/` (alongside the built-in
+`Eclipse`/`Ghidra`/`IDAPro` dirs) silently does nothing — Ghidra does not scan
+that path for user extensions. `GhidraMCP` was already installed in the user
+directory, which is what gave the correct pattern.
+
+No 12.1.4 build of XEXLoaderWV exists (12.1.3 is newest) but it works against
+12.1.4 anyway, so the earlier version concern was a red herring.
+
+Requires a **JDK**; the machine had only a JRE, which Ghidra misreports as
+"unsupported java version" even though `application.java.min=21`.
+
+### Section layout
+
+| Section | Range | Size | Flags |
+| --- | --- | --- | --- |
+| `.rdata` | `82000400`-`8206502b` | `0x64c2c` | r |
+| `.pdata` | `82065200`-`82072ecf` | `0xdcd0` | r |
+| `.text` | `82080000`-`822fb843` | `0x27b844` | r-x |
+| `PSFD00` | `822fba00`-`82300aeb` | `0x50ec` | r-x |
+| `.data` | `82310000`-`8249ac97` | `0x18ac98` | rw |
+| `.XBMOVIE` | `8249ae00`-`8249ae0b` | `0xc` | rw |
+| `.idata` | `824a0000`-`824a042f` | `0x430` | rw |
+| `.XBLD` | `824b0000`-`824b00ef` | `0xf0` | r |
+| `.reloc` | `824b0200`-`824cd343` | `0x1d144` | r |
+
+Language: `PowerPC:BE:64:A2ALT-32addr`.
+
+### Boot call chain (from Ghidra)
+
+```
+0x82222E98  kernel entry (matches the XEX kernel base)
+  -> 0x8218DB18
+    -> 0x821FFBA8
+      -> 0x82200AA8
+        -> 0x8218DF20
+          -> 0x8218DD48
+            +-> 0x82220370   XexLoadImage wrapper
+            +-> 0x82220330   XexGetProcedureAddress wrapper
+```
+
+### Trampoline addresses are outside the image
+
+Ghidra's map ends at `0x824cd343`. All three host-function trampolines are
+**unmapped**:
+
+| Address | Source | In image? |
+| --- | --- | --- |
+| `0x880dce78` | `XexGetProcedureAddress(handle, 2)` | **no** |
+| `0x880d0040` | `XexGetProcedureAddress(handle, 1)` | **no** |
+| `0x88678bb8` | second unresolved execute | **no** |
+
+This confirms independently of the runtime that these are host trampolines, not
+guest code.
+
+### Scripts
+
+`ghidra-scripts/ProbeBootPath.java` dumps program info, memory blocks, and
+caller/callee data for the boot-path addresses. Run headless with:
+
+```
+analyzeHeadless ghidra sd360 -process Default.xex -noanalysis \
+  -scriptPath ghidra-scripts -postScript ProbeBootPath.java
+```
+
 ## Options
 
 1. **Identify module ordinal 9** (Ghidra, or the XEX module/section table) and
