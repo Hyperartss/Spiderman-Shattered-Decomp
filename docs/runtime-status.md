@@ -440,6 +440,67 @@ codegen had never processed the DLL.
 this is a *function codegen did not discover* in the DLL, not a missing module.
 Next step is a function-boundary problem in `GameLogic.dll`.
 
+## SOLVED (partly): boot works, then a silent guest crash deadlocks it
+
+The loading screen renders, so drawing and presentation are fine. The black
+screen is a **deadlock caused by a guest thread dying without killing the
+process.**
+
+Recovered with `-DREXGLUE_RECOMP_DEBUG_INFO=full`, which restores stack
+unwinding (with the default `line-tables-only` the backtrace stops at frame 5).
+Note: a fresh configure of that preset does **not** stage `librexruntimed.so`
+and `libTracyClientd.so` next to the binary, so they must be copied from the SDK
+or the binary will not start.
+
+### The chain
+
+1. Many threads — `Main XThread` and several `XThread`s — block in
+   `NtWaitForSingleObjectEx` with **no timeout** and `is_alertable=false`:
+
+   ```cpp
+   NtWaitForSingleObjectEx_entry(
+       object_handle = 4160749624,   // 0xF80EEBC8
+       wait_mode = 1, alertable = 0,
+       timeout_ptr = {host_ptr_ = 0x0, guest_addr_ = 0})   // infinite
+   ```
+
+   Full path: `XObject::Wait` → `rex::thread::Wait` →
+   `PosixConditionBase::Wait` → futex.
+
+2. The thread that would signal that object — `XThread11FFD6C0` — has
+   **crashed with SIGSEGV**:
+
+   ```
+   #0  __imp__sub_82207840   @ sd360_recomp.17.cpp:21559
+       REX_STORE_U32(ea, ctx.r10.u32);      // stwu r10,4(r11), a stack push
+   ```
+
+   A second crash appears in `sub_82202720`.
+
+3. A guest-thread SIGSEGV does not abort the process. The thread simply stops,
+   nothing ever signals the object, and every waiter blocks forever. Audio
+   survives because it runs on separate threads (`XMA Decoder`, `Audio Worker`).
+
+So the black screen is **not** a rendering or VSync problem. It is a guest
+pointer fault killing the thread that the rest of the game is synchronised on.
+
+### Not the cause
+
+- **Async file IO.** `Kernel Dispatch` sits in
+  `dispatch_cond_.wait` (`kernel_state.cpp:655`), which means
+  `dispatch_queue_` is **empty** — no completion is outstanding. The SDK also
+  `REX_FATAL`s if a deferred completion throws, and there are no FATALs.
+- **Presentation.** Disabling `vulkan_async_skip_incomplete_frames` removed the
+  skip warnings and the run went from crashing to surviving indefinitely, but
+  the screen stayed black because nothing was drawing into the frames.
+
+### Next
+
+`sub_82207840` and `sub_82202720` need to be understood — either a bad function
+boundary (so codegen split them wrongly) or a wrong value returned by some
+kernel import. Both are answerable in Ghidra, which already has `GameLogic.dll`
+and `Default.xex` imported with full analysis.
+
 ## Options
 
 1. **Identify module ordinal 9** (Ghidra, or the XEX module/section table) and
