@@ -1,0 +1,88 @@
+diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+--- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+@@ -2049,13 +2049,61 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+             type_float_, ext_inst_glsl_std_450_, GLSLstd450Ldexp, const_float_1_,
+             builder_->createTriOp(spv::OpBitFieldSExtract, type_int_, fetch_constant_word_3_signed,
+                                   builder_->makeUintConstant(13), builder_->makeUintConstant(6)));
++        // num_format (word 3 bit 0) = integer on a 16-bit fixed-point format
++        // (k_16, k_16_16, k_16_16_16_16; format is word 1 bits 0:5): the guest
++        // gets the raw integers, but the host view is UNORM / SNORM, so scale
++        // the normalized result back up. Spider-Man: Shattered Dimensions
++        // resolves its 7e3 HDR scene to k_16_16_16_16 as unsigned integers
++        // with exp bias +11 and reads it back with exp_adjust -11 (5.11 fixed
++        // point); without this, every such read was 1/65535 of the real value.
++        id_vector_temp_.clear();
++        id_vector_temp_.push_back(const_int_0_);
++        id_vector_temp_.push_back(
++            builder_->makeIntConstant(int((fetch_constant_word_0_index + 1) >> 2)));
++        id_vector_temp_.push_back(
++            builder_->makeIntConstant(int((fetch_constant_word_0_index + 1) & 3)));
++        spv::Id fetch_constant_word_1 = builder_->createLoad(
++            builder_->createAccessChain(spv::StorageClassUniform, uniform_fetch_constants_,
++                                        id_vector_temp_),
++            spv::NoPrecision);
++        spv::Id fetch_format = builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
++                                                     fetch_constant_word_1,
++                                                     builder_->makeUintConstant(63));
++        spv::Id fetch_is_16bpc_fixed = builder_->createBinOp(
++            spv::OpLogicalAnd, type_bool_,
++            builder_->createBinOp(
++                spv::OpUGreaterThanEqual, type_bool_, fetch_format,
++                builder_->makeUintConstant(uint32_t(xenos::TextureFormat::k_16))),
++            builder_->createBinOp(
++                spv::OpULessThanEqual, type_bool_, fetch_format,
++                builder_->makeUintConstant(uint32_t(xenos::TextureFormat::k_16_16_16_16))));
++        spv::Id fetch_num_format_integer = builder_->createBinOp(
++            spv::OpINotEqual, type_bool_,
++            builder_->createBinOp(spv::OpBitwiseAnd, type_int_, fetch_constant_word_3_signed,
++                                  builder_->makeIntConstant(1)),
++            const_int_0_);
++        spv::Id fetch_unnormalize = builder_->createBinOp(
++            spv::OpLogicalAnd, type_bool_, fetch_is_16bpc_fixed, fetch_num_format_integer);
++        spv::Id result_scale_unsigned = builder_->createTriOp(
++            spv::OpSelect, type_float_, fetch_unnormalize,
++            builder_->createNoContractionBinOp(spv::OpFMul, type_float_, result_exponent_bias,
++                                               builder_->makeFloatConstant(65535.0f)),
++            result_exponent_bias);
++        spv::Id result_scale_signed = builder_->createTriOp(
++            spv::OpSelect, type_float_, fetch_unnormalize,
++            builder_->createNoContractionBinOp(spv::OpFMul, type_float_, result_exponent_bias,
++                                               builder_->makeFloatConstant(32767.0f)),
++            result_exponent_bias);
+         {
+           uint32_t result_remaining_components = used_result_nonzero_components;
+           uint32_t result_component_index;
+           while (rex::bit_scan_forward(result_remaining_components, &result_component_index)) {
+             result_remaining_components &= ~(UINT32_C(1) << result_component_index);
++            spv::Id result_component_scale = builder_->createTriOp(
++                spv::OpSelect, type_float_, result_is_signed[result_component_index],
++                result_scale_signed, result_scale_unsigned);
+             result[result_component_index] = builder_->createNoContractionBinOp(
+-                spv::OpFMul, type_float_, result[result_component_index], result_exponent_bias);
++                spv::OpFMul, type_float_, result[result_component_index], result_component_scale);
+           }
+         }
+       }
+diff --git a/src/graphics/util/draw.cpp b/src/graphics/util/draw.cpp
+--- a/src/graphics/util/draw.cpp
++++ b/src/graphics/util/draw.cpp
+@@ -1086,6 +1086,18 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
+   // Override with the depth format to make sure the shader doesn't have any
+   // reason to try to do k_8_8_8_8 packing.
+   info_out.copy_dest_info.copy_dest_format = xenos::ColorFormat(dest_format);
++  // A copy to a 16-bit fixed-point format with the unsigned integer number
++  // format stores raw integers (n = v * 2^exp_bias), but the resolve shaders
++  // always pack normalized values (n = saturate(v * 2^exp_bias) * 65535), which
++  // saturates at v = 2^-exp_bias. Pre-divide by 2^16 so the stored integers
++  // match (to within 65535/65536); the texture fetch scales the normalized
++  // value back up when the fetch constant's num_format is integer.
++  if (!is_depth &&
++      rb_copy_dest_info.copy_dest_number == xenos::SurfaceNumberFormat::kUnsignedInteger &&
++      (dest_format == xenos::TextureFormat::k_16 || dest_format == xenos::TextureFormat::k_16_16 ||
++       dest_format == xenos::TextureFormat::k_16_16_16_16)) {
++    exp_bias = std::max(exp_bias - int32_t(16), int32_t(-32));
++  }
+   // Handle k_16_16 and k_16_16_16_16 range.
+   info_out.copy_dest_info.copy_dest_exp_bias = exp_bias;
+   if (is_depth) {

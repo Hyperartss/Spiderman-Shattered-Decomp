@@ -684,3 +684,201 @@ later runs. Clear with `rm -f /dev/shm/xenia_memory_*` when a run ends badly.
 Forcing PROT_WRITE over the arena is NOT a workaround. The read-only pages are
 how `EnableAccessCallbacks` traps guest access to GPU-managed memory; forcing
 them writable disables the GPU cache-invalidation trap and renders black.
+
+## SOLVED: black screen at the Beenox logo (leaked XAudio2 engine lock)
+
+### Symptom
+
+FrontScreen loads, the Marvel and Activision logo movies play, then the screen
+goes black (audio may keep going) exactly where the Beenox logo should start.
+
+### What was really happening (measured, not inferred)
+
+Open-file sampling of `/proc/<pid>/fd` once a second:
+
+```
+t=3   Data/FrontScreen.pkz
+t=5   video/LogoIntros/MarvelIntro.usm
+t=19  video/LogoIntros/ActivisionIntro.usm     <- stays open forever
+      video/LogoIntros/BeenoxIntro.usm         <- never opened
+```
+
+So the Activision movie never finishes tearing down. Live gdb (all guest
+threads mapped to their KTHREAD pointers) at ~36 s and ~48 s:
+
+```
+CSW waiter=XThread1FFD6C0            (XAudio2 processing thread, sub_82266878)
+CS lock_count=2 recursion=2 owner=30029018   (= Main XThread)
+```
+
+The main thread owns XAudio2's engine critical section twice and never
+releases it; the audio thread blocks in `RtlEnterCriticalSection` forever, so
+the movie's voice never stops and the movie never reports completion.
+
+A breakpoint trace of the engine lock's Enter (`sub_82235FD0`) / Leave
+(`sub_82235FE0`) on the main thread shows the two unmatched Enters at the end
+of the Activision movie (~30 s), both through `sub_82245AB0` (engine Lock()),
+reached from `sub_82247E78` and `sub_82236250` (voice teardown). Their matching
+Unlock() is the very next function, `0x82245AC8`.
+
+### Root cause: `{ size = 0x8 }` in the manifest
+
+`0x82245AC8` was in `[entrypoint.functions]` as `{ size = 0x8 }`. A CONFIG
+`size` is authoritative (it outranks PDATA, `phase_register.cpp`), so codegen
+emitted only the first two instructions:
+
+```cpp
+DEFINE_REX_FUNC(sub_82245AC8) {
+	// lwz r11,72(r3)
+	// addi r3,r11,64
+}        // <- the vtable+20 tail call to RtlLeaveCriticalSection is gone
+```
+
+Unlock() became a no-op. The other `size = 0x8` entries have the same defect
+wherever the function is longer than 8 bytes (`0x822FCB68`, `0x820CA870`, and
+likely several in GameLogic.dll); only `0x822B9B50` and `0x8223A390` were
+genuinely short thunks.
+
+**Correction to earlier notes:** these addresses are not "XEX hotpatch
+entries". They are ordinary functions reached only through vtables / indirect
+calls, so discovery never saw a direct call to them.
+
+### Fix
+
+Every entry is now `= {}`: the entry point is registered, and discovery finds
+the natural end (`phase_discover.cpp`: "If no size specified (size=0), let
+discovery find natural boundaries via region"). `fix-missing-functions.sh` now
+appends `{}` instead of `{ size = 0x8 }`.
+
+### Other earlier conclusions that were wrong
+
+- **"A guest-thread SIGSEGV deadlocks every waiter" / "the guest writes to a
+  read-only page".** Those SIGSEGVs are ReXGlue's normal write-watch traps
+  (`EnableAccessCallbacks` protects GPU-shared pages read-only and handles the
+  fault). A gdb run with `AccessViolationCallbackThunk` instrumented shows
+  hundreds of them handled per second. gdb stops on them by default, which
+  made them look like crashes. Always run with
+  `handle SIGSEGV nostop noprint pass`.
+- **"The guest issues no draw work."** The render thread
+  (`sub_8220C700 -> sub_82207E78`) is live, and the ring-buffer read pointer
+  advances between samples (`*rptr` 0x683 -> 0x7E7 -> 0x94B).
+
+### Debug tooling (in `logs/claude/`, git-ignored)
+
+- `sample.sh <first> <interval> <n> <out>`: runs sd360 under gdb, interrupts
+  n times, and runs `xthreads` (guest thread -> KTHREAD -> guest call chain)
+  and `cswaiters` (every thread blocked in RtlEnterCriticalSection, plus the
+  CS owner) from `ring.py`.
+- `sample_lock.sh`: the same, plus `lockt.py`, which logs every main-thread
+  Enter/Leave of the XAudio2 engine lock to `lock_trace.txt`.
+- `mon.sh <secs> <tag>`: plain run that samples the game files open every
+  second (the cheapest way to see how far boot got).
+
+## Measured boot state (2026-10-20, after the manifest fix)
+
+| Stage | Debug build | RelWithDebInfo build |
+| --- | --- | --- |
+| Loading screen | renders | renders |
+| Marvel / Activision / Beenox movies | play (audio), **video black** | same |
+| Front-end load (`Streams.dat`) | **abort**: SDK debug assert `texture_cache.cpp:876 !(parameters.mip_linear)` | OK |
+| Title screen ("PRESS START") | not reached | **renders**, 3D background washed out / near white |
+
+- `0x881EFC00` (GameLogic.dll) was the next missing entry point; added as `{}`
+  under `[modules.functions]`. `fix-missing-functions.sh` used to append new
+  entries at EOF, which landed them in `[entrypoint.functions]` (wrong binary,
+  silently ignored); it now inserts under the correct header.
+- RelWithDebInfo: `cmake --preset linux-amd64-relwithdebinfo -Drexglue_DIR=...`
+  then build; copy `librexruntimerd.so` and `libTracyClientrd.so` from
+  `tools/linux-amd64/lib` next to the binary (not staged automatically).
+  Run with `PRESET=linux-amd64-relwithdebinfo ./run.sh`.
+- `render_target_path_vulkan=fsi` hits a debug assert in
+  `RenderTargetCache::last_update_accumulated_render_targets()`; untested in
+  RelWithDebInfo.
+
+### Movie video is black: what is known
+
+Per frame the game clears the RT, then draws one RectangleList with
+VS `1377FFBBFD60DADA` / PS `10F50C571CB15333` (YUV->RGB with a pow/gamma step
+via `log`/`exp`), then resolves to the front buffer at `0x04445000`. The Y/U/V
+planes (`k_8`, 1120x632 + 2x 560x316) are uploaded every frame, the fetch
+constants and PS constants c251-c255 are sane (1.164 / 1.596 / 2.017 / 2.4),
+alpha ref 0.0039, the viewport covers 1120x632, and no `IssueDraw failed` is
+logged -- yet the resolved image is exactly the clear colour. The menu being
+washed out white points at the same area: shader translation (log/exp/cnd*)
+or render-target format / gamma handling, not game code.
+
+`SD360_CAPTURE_DIR=<dir>` (optionally `SD360_CAPTURE_EVERY=<s>`) dumps the
+guest's presented frame to PPM, so this can be checked without screenshots.
+
+
+## SOLVED: black movies and black/white title-screen 3D (2026-10-20)
+
+State after these fixes: boot -> Marvel / Activision / Beenox logos -> intro
+movie -> title screen with the 3D Spider-Man scenes rendering. Remaining:
+occasional black flickers and some briefly broken shaders (see "Open").
+
+### Movies black: render target path
+
+With the default host-render-target path every `.usm` movie draws black (audio
+plays). `REX_RENDER_TARGET_PATH_VULKAN=fsi` (fragment shader interlock, EDRAM
+emulated in the pixel shader) plays them. `run.sh` now sets it by default. The
+fsi path trips debug asserts, so the RelWithDebInfo build is the default too.
+
+### Title-screen 3D: two SDK bugs in texture fetch (patches/0001, 0002)
+
+Measured with `logs/claude/fetchdump.py` (breakpoints on
+`VulkanCommandProcessor::IssueDraw/IssueCopy`, dumping texture fetch constants
+and resolve registers). The game's HDR chain:
+
+```
+draw 7e3 / k_16_16_16_16 render target
+COPY  dest fmt 26 (k_16_16_16_16)  RB_COPY_DEST_INFO=0x000B4D01
+      -> copy_dest_number = 2 (unsigned integer), copy_dest_exp_bias = +11
+FETCH tf fmt 26  w3=0x0106AD11
+      -> num_format = 1 (integer), exp_adjust = -11
+```
+
+i.e. it stores the scene as 5.11 fixed-point integers and reads it back with
+`int * 2^-11`.
+
+1. **0001** — the SPIR-V translator read the result exponent bias from fetch
+   word 4 bits 13:18 (that is inside the LOD bias field). The field is word 3
+   bits 13:18 (`xe_gpu_texture_fetch_t::exp_adjust`), which the DXBC
+   translator already uses. Before: the -11 was never applied -> white.
+2. **0002** — integer `num_format` on 16-bit fixed-point textures was not
+   implemented (the SDK's own comment in `vulkan/texture_cache.h` says to add a
+   multiplier "if any game is seen using num_format 1 for fixed-point
+   formats" — this one does). The host view is UNORM, so a read returned
+   `int/65535`, and the resolve shader packed `saturate(v*2^11)*65535`
+   (saturating at v = 1/2048) instead of the integer `v*2^11`. After 0001
+   alone: everything 65535x too dark -> black.
+   Fix: resolve to an unsigned-integer 16-bit destination uses
+   `exp_bias - 16` (`util/draw.cpp`), and the texture fetch multiplies by
+   65535 (32767 for signed components) when `num_format` is integer and the
+   format is k_16 / k_16_16 / k_16_16_16_16 (`spirv_translator_fetch.cpp`).
+   Net error is 65535/65536.
+
+Both patches live in `patches/` and are applied to `tools/rexglue-sdk`; only
+the GPU plugin needs rebuilding:
+
+```
+cd tools/rexglue-sdk
+git apply ../../patches/0001-*.patch ../../patches/0002-*.patch
+cmake --preset linux-amd64 -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20
+cmake --build out/build/linux-amd64 --config RelWithDebInfo --target rexgpu-xenos
+cp out/linux-amd64/RelWithDebInfo/librexgpu-xenosrd.so \
+   ../../sd360/out/build/linux-amd64-relwithdebinfo/
+```
+
+(The original prebuilt plugin/runtime are kept in
+`sd360/out/build/linux-amd64-relwithdebinfo/prebuilt-sdk/`.)
+
+Not covered by 0002: signed-integer resolve destinations, and 8-bit / 32-bit
+fixed formats with integer num_format. Not seen in this game so far.
+
+### Open
+
+- Occasional black flicker and briefly wrong shaders. First suspect:
+  `async_shader_compilation` (default true) combined with
+  `REX_VULKAN_ASYNC_SKIP_INCOMPLETE_FRAMES=false`, which presents frames drawn
+  while pipelines are still compiling.

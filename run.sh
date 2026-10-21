@@ -24,6 +24,16 @@
 #      This must be an environment variable, not rex::cvar::SetFlagByName: the
 #      in-code set runs too early to affect the present-time read.
 #
+#   4. REX_RENDER_TARGET_PATH_VULKAN=fsi. The default host-render-target path
+#      mishandles this game's EDRAM aliasing: every movie (Marvel/Activision/
+#      Beenox logos, intro) renders black. The fragment-shader-interlock path
+#      emulates EDRAM directly and plays them. Override with
+#      REX_RENDER_TARGET_PATH_VULKAN= to get the host path back.
+#
+#   5. The GPU plugin in the RelWithDebInfo build dir is built from
+#      tools/rexglue-sdk with patches/0001 and 0002 applied; without them the
+#      title-screen 3D is white (0001 missing) or black (0002 missing).
+#
 # Usage:
 #   ./run.sh                 run with defaults
 #   ./run.sh --window_width 1280 --window_height 720
@@ -33,7 +43,11 @@ set -uo pipefail
 
 cd "$(dirname "$0")"
 
-BUILD_DIR="$PWD/sd360/out/build/linux-amd64-debug"
+# The optimised build is the default (PRESET=linux-amd64-debug ./run.sh for the
+# debug one). The debug SDK runtime aborts on harmless asserts
+# (texture_cache.cpp:876 at the title screen, and the fsi path asserts too);
+# RelWithDebInfo has them compiled out and reaches the menu.
+BUILD_DIR="$PWD/sd360/out/build/${PRESET:-linux-amd64-relwithdebinfo}"
 
 if [ ! -x "$BUILD_DIR/sd360" ]; then
   echo "No binary at $BUILD_DIR/sd360"
@@ -53,4 +67,5 @@ fi
 exec env \
   LD_LIBRARY_PATH="$BUILD_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
   REX_VULKAN_ASYNC_SKIP_INCOMPLETE_FRAMES=false \
+  REX_RENDER_TARGET_PATH_VULKAN="${REX_RENDER_TARGET_PATH_VULKAN-fsi}" \
   "$BUILD_DIR/sd360" --game_data_root "$PWD/run" "$@"

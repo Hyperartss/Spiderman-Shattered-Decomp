@@ -24,37 +24,41 @@ file_path = "../assets/Data/GameLogic.dll"
 out_directory_path = "generated/GameLogic"
 includes = []
 
-# Function boundaries codegen's discovery missed.
+# Function entry points codegen's discovery missed (reached only through
+# vtables / indirect calls, so the runtime reported them as
+# "Call to invalid or unregistered function").
 #
-# Every one of these is an XEX hotpatch entry: the game patches each function's
-# first instruction into an unconditional branch to a per-region hotpatch stub.
-# Discovery does not treat those as entries, so calling one lands in
-# InvalidFunctionTrap ("Call to invalid or unregistered function").
+# IMPORTANT: no `size` here. A CONFIG `size` is authoritative and outranks
+# PDATA, so the old `size = 0x8` entries truncated every one of these to two
+# instructions. Most of them are NOT two-instruction hotpatch stubs -- e.g.
+# 0x82245AC8 is XAudio2's engine Unlock(), and truncating it dropped the
+# RtlLeaveCriticalSection tail call. The main thread then leaked the engine
+# lock at the end of the Activision logo movie, the XAudio2 thread blocked on
+# it forever, the movie never finished, and the game sat on a black screen
+# where the Beenox logo should play.
 #
-# EnumerateHotpatchEntries.java finds the ones Ghidra had already decoded.
-# 0x8824fd98 was found by the runtime instead: code that was never decoded
-# cannot appear in a listing scan. Expect more, one runtime report at a time.
-#
-# size 0x8 covers the hotpatch branch plus its trailing nop. Codegen splits at
-# any entry point it already knows, so an undersized entry is safe.
+# An empty table registers the entry point and lets discovery find the natural
+# end (phase_discover.cpp: "If no size specified (size=0), let discovery find
+# natural boundaries via region").
 [modules.functions]
-0x88212ee0 = { size = 0x8 }
-0x8824fd98 = { size = 0x8 }
-0x88232eb8 = { size = 0x8 }
-0x88238260 = { size = 0x8 }
-0x8824ca80 = { size = 0x8 }
-0x8847e048 = { size = 0x8 }
-0x885d2040 = { size = 0x8 }
-0x885fa7b8 = { size = 0x8 }
-0x8868a0b0 = { size = 0x8 }
-0x882166D0 = { size = 0x8 }
+0x88212ee0 = {}
+0x8824fd98 = {}
+0x88232eb8 = {}
+0x88238260 = {}
+0x8824ca80 = {}
+0x8847e048 = {}
+0x885d2040 = {}
+0x885fa7b8 = {}
+0x8868a0b0 = {}
+0x882166D0 = {}
+0x881EFC00 = {}
 
 # Same problem, but in Default.xex rather than GameLogic.dll. Addresses in the
 # entrypoint's range (code 0x82080000-0x82300AEC) belong here, not under
 # [modules.functions].
 [entrypoint.functions]
-0x822B9B50 = { size = 0x8 }
-0x822FCB68 = { size = 0x8 }
-0x820CA870 = { size = 0x8 }
-0x82245AC8 = { size = 0x8 }
-0x8223A390 = { size = 0x8 }
+0x822B9B50 = {}
+0x822FCB68 = {}
+0x820CA870 = {}
+0x82245AC8 = {}
+0x8223A390 = {}

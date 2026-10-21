@@ -116,19 +116,25 @@ add_entry() {
     echo "  0x$addr already declared; nothing to add"
     return 1
   fi
-  if [ "$table" = "modules" ]; then
-    ensure_table "[modules.functions]"
-  else
-    ensure_table "[entrypoint.functions]"
-  fi
-  printf '0x%s = { size = 0x8 }\n' "$addr" >> "$MANIFEST"
+  local header
+  if [ "$table" = "modules" ]; then header="[modules.functions]"; else header="[entrypoint.functions]"; fi
+  ensure_table "$header"
+  # Insert directly under the right table header. Appending at EOF would land
+  # the entry in whichever table happens to be last (and be silently ignored
+  # if that is the wrong binary's table).
+  awk -v h="$header" -v e="0x$addr = {}" '{print} $0==h{print e}' "$MANIFEST" > "$MANIFEST.tmp" \
+    && mv "$MANIFEST.tmp" "$MANIFEST"
   echo "  added 0x$addr to [$table.functions]"
   return 0
 }
 
 run_once() {
-  LD_LIBRARY_PATH="$BUILD_DIR" timeout -s KILL 90 "$BUILD_DIR/sd360" \
+  # A killed run leaks its ~4.5 GB guest arena in /dev/shm; clear it either side.
+  pgrep -x sd360 >/dev/null || rm -f /dev/shm/xenia_memory_*
+  LD_LIBRARY_PATH="$BUILD_DIR" REX_VULKAN_ASYNC_SKIP_INCOMPLETE_FRAMES=false \
+    timeout -s KILL "${RUN_SECS:-90}" "$BUILD_DIR/sd360" \
     --game_data_root "$GAME_ROOT" > /dev/null 2>&1
+  rm -f /dev/shm/xenia_memory_*
 }
 
 for i in $(seq 1 "$MAX_ITER"); do
