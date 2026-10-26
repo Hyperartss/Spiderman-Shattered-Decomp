@@ -30,7 +30,11 @@
 #      emulates EDRAM directly and plays them. Override with
 #      REX_RENDER_TARGET_PATH_VULKAN= to get the host path back.
 #
-#   5. The GPU plugin in the RelWithDebInfo build dir is built from
+#   5. controls.cfg. Keyboard + mouse controls (the SDK's mnk driver), one
+#      cvar per line, passed through as --name=value. CONTROLS_FILE= ./run.sh
+#      skips it (controller only); CONTROLS_FILE=other.cfg uses another file.
+#
+#   6. The GPU plugin in the RelWithDebInfo build dir is built from
 #      tools/rexglue-sdk with patches/0001 and 0002 applied; without them the
 #      title-screen 3D is white (0001 missing) or black (0002 missing).
 #
@@ -64,8 +68,19 @@ if [ ! -e run/default.xex ]; then
   exit 1
 fi
 
+CONTROL_ARGS=()
+CONTROLS_FILE="${CONTROLS_FILE-$PWD/controls.cfg}"
+if [ -n "$CONTROLS_FILE" ] && [ -f "$CONTROLS_FILE" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] && CONTROL_ARGS+=("--$line")
+  done < "$CONTROLS_FILE"
+fi
+
 exec env \
   LD_LIBRARY_PATH="$BUILD_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
   REX_VULKAN_ASYNC_SKIP_INCOMPLETE_FRAMES=false \
   REX_RENDER_TARGET_PATH_VULKAN="${REX_RENDER_TARGET_PATH_VULKAN-fsi}" \
-  "$BUILD_DIR/sd360" --game_data_root "$PWD/run" "$@"
+  "$BUILD_DIR/sd360" --game_data_root "$PWD/run" "${CONTROL_ARGS[@]}" "$@"

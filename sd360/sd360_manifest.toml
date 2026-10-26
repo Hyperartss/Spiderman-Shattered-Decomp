@@ -41,6 +41,8 @@ includes = []
 # end (phase_discover.cpp: "If no size specified (size=0), let discovery find
 # natural boundaries via region").
 [modules.functions]
+0x88325ED0 = {}
+0x8858BD30 = {}
 0x88212ee0 = {}
 0x8824fd98 = {}
 0x88232eb8 = {}
