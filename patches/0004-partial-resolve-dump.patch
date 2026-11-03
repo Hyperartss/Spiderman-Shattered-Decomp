@@ -1,0 +1,47 @@
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index 953c5fd..c648087 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -1,3 +1,5 @@
++#include <cstdio>
++#include <ctime>
+ /**
+  ******************************************************************************
+  * Xenia : Xbox 360 Emulator Research Project                                 *
+@@ -566,13 +568,29 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+ 
+   // Estimate height used by render targets (for color for writes, for depth /
+   // stencil for both reads and writes) from various sources.
+-  uint32_t height_used =
+-      std::min(GetRenderTargetHeight(pitch_tiles_at_32bpp, msaa_samples),
+-               draw_extent_estimator_.EstimateMaxY(
+-                   interlock_barrier_only
+-                       ? REXCVAR_GET(execute_unclipped_draw_vs_on_cpu_for_psi_render_backend)
+-                       : true,
+-                   vertex_shader));
++  uint32_t sd360_rt_height = GetRenderTargetHeight(pitch_tiles_at_32bpp, msaa_samples);
++  uint32_t sd360_est_height = draw_extent_estimator_.EstimateMaxY(
++      interlock_barrier_only
++          ? REXCVAR_GET(execute_unclipped_draw_vs_on_cpu_for_psi_render_backend)
++          : true,
++      vertex_shader);
++  uint32_t height_used = std::min(sd360_rt_height, sd360_est_height);
++  // SD360 diagnostic: log every change of the height a render target is
++  // considered to use. A resolve that only covers part of the target leaves a
++  // thin strip of valid pixels in a texture the game samples as full-frame,
++  // which matches the squashed-strip artifact.
++  {
++    static uint32_t sd360_last_rt = 0, sd360_last_est = 0;
++    if (sd360_rt_height != sd360_last_rt || sd360_est_height != sd360_last_est) {
++      sd360_last_rt = sd360_rt_height;
++      sd360_last_est = sd360_est_height;
++      std::fprintf(stderr,
++                   "SD360RT t=%ld rt_height=%u estimated_max_y=%u used=%u pitch_tiles=%u msaa=%u\n",
++                   (long)std::time(nullptr), sd360_rt_height, sd360_est_height, height_used,
++                   uint32_t(pitch_tiles_at_32bpp), uint32_t(msaa_samples));
++      std::fflush(stderr);
++    }
++  }
+ 
+   // Sorted by EDRAM base and then by index in the pipeline - for simplicity,
+   // treat render targets placed closer to the end of the EDRAM as truncating

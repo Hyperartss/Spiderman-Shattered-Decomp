@@ -30,9 +30,19 @@
 #      emulates EDRAM directly and plays them. Override with
 #      REX_RENDER_TARGET_PATH_VULKAN= to get the host path back.
 #
-#   5. controls.cfg. Keyboard + mouse controls (the SDK's mnk driver), one
-#      cvar per line, passed through as --name=value. CONTROLS_FILE= ./run.sh
-#      skips it (controller only); CONTROLS_FILE=other.cfg uses another file.
+#   5. PC controls are built into the binary (src/pc_controls.h), so no extra
+#      config file is needed. Any --keybind_* / --mnk_* flag given on the
+#      command line still overrides the built-in layout.
+#
+#   7. --gpu_allow_invalid_fetch_constants=true. This title uploads texture
+#      fetch constants whose type field (dword 0 bits 0:1) is 0 =
+#      kInvalidTexture, while everything else in the constant is a well-formed
+#      texture (format, base pages, pitch). The emulator's strict check skips
+#      every draw using them, which is why the main-menu background renders
+#      black and the dimension switch draws garbage. Measured 2026-11-02:
+#      748 "has \"invalid\" type" warnings in a menu run, 0 with this flag, and
+#      the title background + museum intro then render correctly. Truly empty
+#      constants (base page 0) are still ignored by the texture cache.
 #
 #   6. The GPU plugin in the RelWithDebInfo build dir is built from
 #      tools/rexglue-sdk with patches/0001 and 0002 applied; without them the
@@ -68,19 +78,9 @@ if [ ! -e run/default.xex ]; then
   exit 1
 fi
 
-CONTROL_ARGS=()
-CONTROLS_FILE="${CONTROLS_FILE-$PWD/controls.cfg}"
-if [ -n "$CONTROLS_FILE" ] && [ -f "$CONTROLS_FILE" ]; then
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line%%#*}"
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    [ -n "$line" ] && CONTROL_ARGS+=("--$line")
-  done < "$CONTROLS_FILE"
-fi
-
 exec env \
   LD_LIBRARY_PATH="$BUILD_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
   REX_VULKAN_ASYNC_SKIP_INCOMPLETE_FRAMES=false \
   REX_RENDER_TARGET_PATH_VULKAN="${REX_RENDER_TARGET_PATH_VULKAN-fsi}" \
-  "$BUILD_DIR/sd360" --game_data_root "$PWD/run" "${CONTROL_ARGS[@]}" "$@"
+  "$BUILD_DIR/sd360" --game_data_root "$PWD/run" \
+  --gpu_allow_invalid_fetch_constants=true "$@"

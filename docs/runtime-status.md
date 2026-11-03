@@ -882,3 +882,494 @@ fixed formats with integer num_format. Not seen in this game so far.
   `async_shader_compilation` (default true) combined with
   `REX_VULKAN_ASYNC_SKIP_INCOMPLETE_FRAMES=false`, which presents frames drawn
   while pipelines are still compiling.
+
+## 2026-11-02: level loading works, PC controls built in
+
+### Missing functions that blocked level loading
+
+Two more indirectly-called entry points, both found by the runtime's own
+`[FATAL] Call to invalid or unregistered function`:
+
+| Address | Binary | Fix |
+| --- | --- | --- |
+| `0x8832B660` | GameLogic.dll | `[modules.functions] 0x8832B660 = {}` |
+| `0x82182648` | Default.xex | `[entrypoint.functions] 0x82182648 = {}` |
+
+`0x8832B660` is a tail-call thunk to `0x881F0AA0`; `0x82182648` reads a pointer
+and returns `-1` when it is null. Neither has a direct caller in the generated
+code, which is why discovery missed them.
+
+After both entries: GameLogic registers **21,053** functions (was 21,052).
+Verified by driving the game with real key events: boot -> title -> save select
+-> main menu -> Level Select -> first level reaches the in-level **AUTO SAVE**
+prompt, with **no FATAL** in the log (`logs/claude/level/`, runtime log
+`sd360_057.log`). Before these fixes the same path died on `0x8832B660` and
+then `0x82182648`.
+
+**Build gotcha:** `sd360_GameLogic` is not part of the default `all` target.
+Changing a `[modules.functions]` entry regenerates the DLL sources but a plain
+`cmake --build --preset linux-amd64-relwithdebinfo` leaves the old
+`libsd360_GameLogic.so` in place (it was 12 days stale here). Build
+`--target sd360_GameLogic` explicitly, or the runtime loads the stale module.
+
+### PC controls are now built in
+
+- New `sd360/src/pc_controls.h` holds the layout; `Sd360App::OnPostSetup`
+  applies it with `rex::cvar::SetFlagByName`, but only for flags whose
+  `GetFlagSource()` is still `Source::kDefault`. Config file, `REX_*`
+  environment variables and `--flag` overrides all still win.
+- Layout follows the 2010 PC port: WASD + mouse look, LMB fast attack, RMB web
+  zip (tap) / web swing (hold), Space jump, Enter select, Esc pause. Bindings
+  the PC documentation does not list are marked `[guess]` in the header.
+- `controls.cfg` was deleted and `run.sh` no longer parses it. Verified by
+  navigating the menus with only Enter and Down (no config file present).
+
+### Dimension fade — still open (measured)
+
+With `SD360_CAPTURE_MS=500` the menu fade shows repeated black windows where the
+3D scene drops to a constant clear colour while the UI keeps drawing:
+`71.8`, `74.3-74.8`, `87.5-88.5`, `91.0-91.5 s` in `logs/claude/final/`.
+This is the same outage that made level select look black before selecting a
+level, so the fade and the "levels don't load" symptom share a render-target
+cause rather than a game-logic one.
+
+A/B result: `REX_GPU_ALLOW_INVALID_FETCH_CONSTANTS=true` (the bypass the SDK's
+own warning suggests) did **not** remove the black windows
+(`logs/claude/fetchfix/`). The runs still emit thousands of *invalid texture
+fetch constant* warnings, so the fetch path is not what is dropping the scene.
+
+Still to try, in order: the fsi vs host render-target path per scene (host path
+fixes nothing here but is cheap to compare), `direct_host_resolve`, and the
+EDRAM resolve formats. Do not conclude it is shader compilation without a run
+with `async_shader_compilation=false` to compare.
+
+### Fade investigation, second pass (same day)
+
+Ruled out, with measurements:
+
+1. **Shader compilation.** In a run with a warm pipeline cache the log contains
+   **zero** `Creating graphics pipeline state` lines, yet the black windows
+   still occur (`sd360_056.log`). The earlier "async shaders" theory is dead.
+2. **Render-target path choice.** `REX_RENDER_TARGET_PATH_VULKAN=` (host path)
+is    far worse, not better: black stretches of 13-33 s during the same menu
+   window (`logs/claude/hostmenu/`). `fsi` is the correct default; the fade
+   problem is a specific resolve/fetch step, not the overall path.
+3. **Invalid fetch constants.** `REX_GPU_ALLOW_INVALID_FETCH_CONSTANTS=true`
+   changes nothing (`logs/claude/fetchfix/`).
+
+Remaining suspect: integer `num_format` coverage. `patches/0002` handles only
+**unsigned 16-bit** fixed-point resolve destinations and fetches; its own notes
+say signed-integer destinations and 8-bit / 32-bit fixed formats are not
+covered. A fade intermediate in one of those formats would come back black or
+blown out — which also matches the in-level frame that jumped from luma 38 to
+158 right before the run ended.
+
+`REX_DIRECT_HOST_RESOLVE=false` was tested as well and is **worse**: 24 black
+windows in the 60-190 s span, some 6.6 s long, against 4 short (0.5-1.5 s)
+windows with the current defaults (`logs/claude/dhr/`). So the shipped
+configuration (`fsi`, direct host resolve on) remains the best of the three;
+the defect is a narrow resolve/fetch gap, not the path or resolve mode.
+
+To pin the format down, the resolve already emits a `REXGPU_TRACE` line naming
+the source and destination formats (`util/draw.cpp`, "Resolve: ... -> ..."), but
+only at trace level. That is the next diagnostic: a short run at trace level,
+grep `Resolve:` around a black window. Do not ship an SDK format patch before
+that, and get approval first per AGENTS.md rule 6.
+
+### "Crash on level load" — not reproduced on the current build
+
+`coredumpctl` holds exactly one sd360 abort: **2026-11-02 01:56:22**, SIGABRT,
+which is the process death that followed the `0x82182648` FATAL at 01:56:19 —
+before that address was registered. Nothing since.
+
+Two apparent "crashes" while testing were not crashes. `ReXApp::OnClosing`
+(`rex_app.cpp:498`) logs `Window closing, shutting down...` and calls `_Exit(0)`;
+that path is a window-close request, and one run was also killed by a
+`pkill -x sd360` from an overlapping test script. Both look like a clean exit in
+the log, with no core dump. Lesson for future runs: never let two driven runs
+overlap.
+
+What *is* verified on the current build: the level loads and renders geometry
+(`logs/claude/crash1/final.png`), reaching the in-level auto-save prompt, with
+no FATAL. If a crash still happens in normal use, capture the runtime log and
+`coredumpctl list` from that exact run before changing anything.
+
+## 2026-11-02 — Invalid texture fetch constants: black menu and two-pane garbage
+
+Symptom: the main-menu background renders black, and the Amazing/Ultimate
+dimension switch draws two horizontally repeated, magenta/green copies of the
+scene in a band at the top of the window with black below; the same corruption
+shows up in the level.
+
+Diagnosis:
+
+- The guest output captured through `SD360_CAPTURE_MS` is always clean, so the
+  fault is in draws the emulator refuses to issue, not in the presenter (the
+  1120x632 -> 1920x1080 blit renders the title correctly).
+- `sd360_069.log` contains **748** warnings during a menu run:
+  `Texture fetch constant (...) has "invalid" type!`
+  Four distinct constants, all with `dword_0 & 3 == 0`
+  (`FetchConstantType::kInvalidTexture`) while the rest of each constant is a
+  well-formed texture (format 6 = `k_8_8_8_8`, non-zero base pages):
+
+      804248FC 0AD2B086 07C0F81F 00A80C14 00000003 00000C00
+      88C00000 067B805A 004EE45F 012EAD11 00000003 00000200
+      810000FC 0AD1A054 000FE07F 00800D10 00000140 0AD1EA00
+      00000000 00000000 00000000 00A80000 00000003 00000000
+
+- `TextureCache::BindingInfoFromFetchConstant`
+  (`src/graphics/pipeline/texture/cache.cpp:904`) returns early for
+  `kInvalidTexture` unless `gpu_allow_invalid_fetch_constants` is set, so every
+  draw using those slots was dropped.
+
+Change (launcher-level workaround): `run.sh` now passes
+`--gpu_allow_invalid_fetch_constants=true`. Truly empty constants are still
+skipped by the cache (`base_page == 0 && mip_page == 0` -> return), so this does
+not make the emulator invent textures for unused slots.
+
+Verified: the same menu run with the flag reports **0** invalid-fetch warnings
+(`sd360_071.log`) and the title background cycles Amazing / Ultimate / 2099
+behind the AUTOSAVE dialog. Captures: `logs/claude/art/grid_art2.jpg` (fixed)
+against `logs/claude/art/grid_art.jpg` (black background), and
+`logs/claude/bypass/grid_bypass.jpg`.
+
+Open question: whether the game's constants really carry type 0, or the type
+bits are lost somewhere in the constant upload path. If the latter, this flag
+masks an emulator bug instead of accommodating the title.
+
+## 2026-11-02 (later) — Correction: the two-pane / squashed-level artifact is in the guest output
+
+The invalid-fetch-constant flag from the previous section is still correct for what it
+does (748 warnings -> 0, menu background restored) and should stay. It does **not** fix
+the two-pane artifact: the user reported it still on the main menu and in a level, and a
+reproduction confirms it. The earlier attribution of the two-pane garbage to those
+constants was wrong.
+
+Measured 2026-11-02 14:38-14:53, RelWithDebInfo, `./run.sh` unchanged:
+
+| Run | Render target path | Guest output | Window |
+| --- | --- | --- | --- |
+| `logs/claude/rep3` (fsi, default) | fsi | level 3D squeezed into ~20 of 632 rows at the top; UI text, spider logo normal; persists 25 s+ | same |
+| `logs/claude/hostlvl` (`REX_RENDER_TARGET_PATH_VULKAN=`) | host | same band | same |
+| `logs/claude/winshot`, `art` | fsi | title-screen 3D full frame, correct | same |
+
+Notes:
+
+- The presenter is **not** implicated. `SD360_CAPTURE_DIR` dumps the presenter's own
+  guest-output image, and that image already contains the band
+  (`logs/claude/rep3/lvl_guest.jpg`, `band_full.jpg`). The 1120x632 -> 1920x1080 blit
+  renders the title screen correctly.
+- Movies (YUV full-screen quad) and all 2D UI render full-frame at the correct positions;
+  only the 3D scene pass is wrong, so it is not a global front-buffer problem.
+- Both render-target paths show it, so it is not an EDRAM/fsi resolve difference.
+- Invalid-fetch warnings are 0 in these runs (`sd360_072/074/076.log`), so the flag is
+  active and unrelated.
+- Band height is ~20 of 632 rows (~1/32 of the frame), which points at a
+  viewport/scissor/resolve *rect* rather than a colour or format problem.
+
+Suspects, not yet tested:
+
+- `VdGetCurrentDisplayInformation` (`src/kernel/xboxkrnl/xboxkrnl_video.cpp:205`) reports
+  `display_window_overscan_*` = width/4 and height/4 per side, i.e. a 50%x50% display
+  window. A title that lays out its scene viewport from the display window / scaler
+  parameters would render into a much smaller rect than the front buffer.
+- Per-draw viewport and scissor values in the level. `logs/claude/vpdump.py` was written
+  for this but gdb produced no output on the first attempt (it did not attach).
+- Whether the band scales with the window/video mode: run with
+  `./run.sh --window_width 1280 --window_height 720` and compare band height.
+
+Follow-up, same day: `./run.sh --window_width 1280 --window_height 720` (which also
+changes the guest video mode to 1280x720, `xboxkrnl_video.cpp:42`) does **not** help —
+`logs/claude/w720/tail.jpg` shows the same band, and the guest frames are 1120x632 with
+only the top ~20 rows carrying scene content. So the video mode is not the variable
+either. (A first pass counted every row as "content" because a >3/255 luma threshold
+catches dithering noise in the black area; the montage is the reliable check.)
+
+Two more facts from this pass:
+
+- The front buffer described earlier is 1120x640 (`0x04445000`, 2867200 bytes) while the
+  guest output is 1120x632, so the swap refresh already goes through a scaled/cropped
+  copy path.
+- Both fsi and host render-target paths, both video modes, and the fetch-constant flag on
+  or off all produce the band, so the fault is upstream of all of those: the scene pass'
+  viewport / scissor / resolve rect, or the front-buffer-to-guest-output refresh.
+
+Next step (needs an SDK instrumentation patch, not a fix): log, for the first N draws of
+one level frame, `viewport_info.xy_offset/xy_extent`, the scissor, the active render
+target size and the resolve rect. That names the wrong value directly. `gdb` with
+`logs/claude/vpdump.py` produced no output on the first attempt, so the log has to come
+from inside the plugin (built the same way as patches/0001-0002).
+
+## 2026-11-02 — Correction 2: the "band" is the LEVEL LOADING SCREEN, and the load stalls
+
+The user supplied a screenshot of the artifact alongside the game's spider logo and a red
+progress bar. That identifies the state: it is the **level loading screen**, not gameplay.
+
+Measured with a 1 s guest-frame capture while driving title -> save select -> main menu ->
+level select -> first level (`logs/claude/lvl2/`):
+
+- From t ~= 128 s the red progress bar is **27 px wide and does not change for the next
+  85 s**. The frame alternates between the loading screen (~13-21 bright rows of 158) and
+  occasional full frames (158) - that alternation is the "flicker" being reported.
+- So the level **never finishes loading**. This is the same failure the user described
+  earlier as "levels had loading problems", not a new rendering regression.
+- An earlier count that read the band as "the 3D scene squeezed into 20 rows" was
+  measuring this loading screen; the frames at 92-95 s with very few bright rows are the
+  Xbox LIVE message boxes dimming the screen (`logs/claude/loadbar/loadseq.jpg`).
+
+Process state during the stall (`logs/claude/stall/sample.txt`):
+
+- No error, no FATAL, no missing-function trap in `sd360_082.log`.
+- Open files are only `run/Data/Streams.dat`, the runtime log and the shader caches - no
+  file is being read, so it is not an I/O call left in flight.
+- Guest threads are almost all in `futex_do_wait` (Main XThread too); one XThread is
+  runnable. That is an in-guest wait (critical section / event / thread join), not a host
+  file read.
+
+Therefore the next question is *which guest wait* the loader is parked on - sample the
+main XThread's guest PC during the stall (gdb) rather than looking at rendering at all.
+
+Superseded conclusions (do not act on them):
+
+- "3D scene squeezed into ~20 rows / wrong viewport" - the frame is the loading screen.
+- The two render-target paths, the video mode and the fetch-constant flag are all
+  irrelevant to this symptom (tested, all identical).
+- The diagnostic draw-dump patch (`patches/0003-draw-state-dump.patch`) is still useful
+  for other issues but will not explain the stall.
+
+Note on the first gdb attempt (`logs/claude/stall2/bt.txt`): it is **not** a sample of the
+stall. gdb stopped on a SIGSEGV in `sub_82202720` (`REX_STORE_U32(ea, ctx.r11.u32)`) because
+the script did not pass SIGSEGV through, and the runtime handles guest page faults with
+that signal. The backtrace therefore shows a normal guest store, not the loader's wait.
+Any repeat must use `handle SIGSEGV nostop noprint pass` (as `logs/claude/sample_vw.sh`
+does) before `run`.
+
+## 2026-11-02 (later) — Correction 3: the strip is in-level 3D, and what is now ruled out
+
+Correction 2 was wrong in its conclusion: the spider logo with the red bar is the **health
+HUD**, not a loading bar. Live window captures during the level show the tutorial hint
+("Push [stick] towards a surface to stick to it", "Use [stick] to move around"), so the game
+*is* in gameplay while the artifact is on screen.
+
+Observed shape of the artifact (logs/claude/still/live_still.png, dims2/grid.jpg):
+
+- The 3D scene is squeezed into roughly 20 of 632 rows at the top, full width; everything
+  below is black. 2D/HUD/text draw correctly at their normal size and position.
+- It comes and goes: in one run eight frames sampled 8 s apart gave one full-screen magenta
+  (uninitialised-texture looking) frame, one *perfectly correct full-screen 3D frame*, and
+  six strip frames.
+- Some frames show the HUD spider twice, at the left and right edges - matching the user's
+  "2 screens at the top left and right".
+- It happens both standing still and moving, on the title screen and in levels, and only for
+  the Amazing and Ultimate dimensions.
+
+Eliminated by measurement on this build (do not re-test these):
+
+1. **Guest viewport.** `patches/0003-draw-state-dump.patch` logs every distinct per-draw
+   state. Across a 195-state session every 3D draw has
+   `vport_scale=(560,-316) vport_offset=(560,316)` - a full 1120x632 frame. No draw ever
+   asks for a short viewport, so the strip is not the guest's viewport.
+2. **Partial resolve extent.** `patches/0004-partial-resolve-dump.patch` logs
+   `GetRenderTargetHeight` vs `DrawExtentEstimator::EstimateMaxY` and the resulting
+   `height_used`. The values cycle 193 / 632 / 1176 / 2352 within every frame, and the same
+   set appears in every 2-second window sampled, whether the screen showed the strip or not -
+   so `height_used` does not separate good frames from bad ones.
+3. Previously ruled out: presenter/blit (the guest's own capture is already banded), video
+   mode 1280x720 vs 1920x1080, the host render-target path vs `fsi`, and the invalid
+   fetch-constant flag (that one still fixes the black menu background and stays on).
+
+What is left: the 3D geometry itself for those two dimensions - the vertex shader or the
+vertex-shader constants it reads - given that the same build renders a correct full-screen
+scene in another frame. The magenta frame suggests a texture or render target being sampled
+before it holds valid content, which may be the same root cause.
+
+Next measurement (not yet done): for strip frames, log the vertex shader hash together with
+the vs constant registers (0x4000 range) and the render target base, and compare against a
+2099/Noir frame that renders correctly.
+
+### Attempt: render-target base comparison (2026-11-02, later still)
+
+`patches/0003-draw-state-dump.patch` now also logs the EDRAM tile base of the colour and
+depth render targets (`RB_COLOR_INFO.color_base | bit_11 << 11`, same for `RB_DEPTH_INFO`),
+alongside viewport, scissor, pitch, MSAA, format and the vertex/pixel shader hashes.
+
+Observed during boot and menu (202 sx360_094.log, 202 distinct states):
+
+- Every 1120-pitch scene/HUD draw uses `cbase=0 dbase=1120`.
+- The 1024x1024 passes use `cbase=0 dbase=0`.
+- No state in the sampled window used a colour base other than 0.
+
+**This did not test the hypothesis**, because the ten screenshots taken during the window
+(logs/claude/bases/grid.jpg, every 6 s) all show the 3D background rendering *full-frame and
+correct* behind the autosave panel - the strip was not on screen at any point in that window.
+The run therefore cannot say whether the strip correlates with a different base, and the
+"no difference between dimensions" reading would be wrong to take from it.
+
+What is needed instead: frame-correlated sampling - log the current state (or a state index)
+once per presented frame from `IssueSwap`, so each screenshot has an exact state line next to
+it. Then a strip frame and a good frame from the *same* dimension can be compared directly.
+
+Frame-correlated sampler (added 2026-11-02, late): `IssueSwap` now logs
+`SD360FRAME t=<unix> n=<frame> fb=<ptr> <w>x<h>` once per presented frame, so any screenshot
+can be tied to the exact frame range it belongs to.
+
+Result of three sampled windows (logs/claude/frames, logs/claude/lvl3):
+
+- Every presented frame in all three windows is `fb=71585792 1120x632` at ~45 fps - one
+  front buffer, one size, no variation, including while the game is running.
+- Colour base is 0 and depth base 1120 tiles for every 1120-pitch scene draw; the 1024x1024
+  passes use depth base 0. No colour base other than 0 was observed.
+- **None of the three windows contained the strip.** Title + autosave panel, idle title, and
+  the save-select screen all rendered the 3D background full-frame and correct.
+
+So the sampler works but has not yet caught a bad frame. The next run must be driven to the
+moment the artifact is actually on screen (the reliable repro so far is in-level, standing
+still: logs/claude/still/live_still.png), and only then compared - otherwise every conclusion
+drawn from the window is about a working screen.
+
+### Captured artifact frame at full resolution (2026-11-02, latest)
+
+A 190 s continuous recording of the window (logs/claude/rec.mkv, 2 fps, 380 frames) with an
+automatic "mostly black" detector found the artifact on screen at ~17 s in. Extracted frame:
+**logs/claude/art34.png** (1920x1080, title screen).
+
+What it shows, measured on that frame:
+
+- The SPIDER-MAN logo and the red PRESS bar are at their normal size and position, sharp.
+- The 3D background is absent except for a band roughly 20 px tall at the very top edge,
+  which contains **three bright fragments at almost exactly 1/4, 1/2 and 3/4 of the width**.
+- Row luminance (192x108 proxy): content only in rows 6-7, then the logo at 18-21 and the
+  PRESS bar at 88-91; everything else is black.
+
+Three evenly spaced copies in a thin band is the signature of a resolve/copy whose geometry
+(pitch, height or tile stride) is wrong - content tiled at a fixed stride - rather than a
+squashed viewport or a missing draw. It also explains "2 screens at the top left and right"
+seen on other frames, which is the same repetition with a different count.
+
+Everything at draw-issue level is already excluded for this build: viewport (always full
+frame), scissor, render-target colour base (always 0) / depth base, MSAA, format, shader
+hash, resolve height estimate, swap size (always 1120x632 at ~45 fps) and the presenter.
+So the next instrument must sit in the **resolve/copy path** (render_target_cache Resolve),
+logging source EDRAM base, pitch in tiles, MSAA, resolve height and destination address for
+the frames that show the band - not in IssueDraw.
+
+Resolve-path logger: `patches/0005-resolve-dump.patch` logs (on change) the copy geometry
+straight out of `draw_util::ResolveInfo` at the top of `VulkanRenderTargetCache::Resolve` -
+depth/colour, EDRAM base, row length, rows, pitch in tiles, width/height in 8-pixel units,
+destination base/start/length and the destination info register. It builds and runs
+(26,378 change entries in one 100 s session).
+
+However the 100 s recording taken with it (`logs/claude/rec2.mkv`, started at a known wall
+clock) contained **zero** artifact frames by the strict detector (bright band in the top ~4%
+with a black gap beneath), so it produced no correlation for the bug. The artifact really is
+intermittent: the earlier 190 s recording caught it at ~17 s, this one did not catch it at all.
+
+To finish this, the run has to be repeated until the detector fires - the instrumentation is
+now all in place (draw state, resolve geometry, per-frame swap, wall-clock timestamps) and the
+detector turns a 100-190 s recording into a list of exact artifact frames.
+
+Third attempt to catch it with the resolve logger: relaunched and recorded from the first
+second for 200 s (logs/claude/rec3.mkv, 400 frames). The strict detector found **zero**
+artifact frames - so the bug was not on screen at all during that run, on any frame.
+
+State of play, honestly: the artifact is real, reproducible in some runs (logs/claude/art34.png)
+and absent in others. All draw-issue and swap-level properties measured so far are identical
+between its presence and absence, and there is not yet a caught frame *with* the resolve
+logger running, so the resolve geometry is still unmeasured at the moment it happens.
+
+The cheapest way to finish: record a long unattended session (10-15 min) in the background
+while the game is played normally, then run the detector over it. The instrumentation needed
+for the correlation (SD360RES / SD360STATE / SD360FRAME, all with wall-clock timestamps) is
+already built into the plugin and enabled with --sd360_draw_dump=true.
+
+### Viewport census across every logged session (decisive negative)
+
+Every distinct draw state ever logged - 3,017 states across eight sessions - was grouped by
+its viewport scale:
+
+    2452  560,-316     full frame (1120x632)
+     292  512,-512     the 1024x1024 passes (depth pre-pass / shadow-style targets)
+     130  140,-79      quarter-size target (280x158)
+      79  70,-39.5     eighth-size target (140x79)
+      50  280,-158     half-size target (560x316)
+      14  0,0          degenerate/no draw
+
+There is **no draw anywhere that asks for a squashed viewport**. A 1/32 vertical squash
+would need a scale near -9.9 and never appears. Since the artifact also keeps the HUD at
+full size inside the same guest frame, the squash is not a viewport, scissor, resolve or
+presenter property - it must come from the vertex/projection data of the scene pass.
+
+Working hypothesis for the fix: the 3D geometry is transformed with a projection whose Y
+scale is ~1/32 (632 / 20 rows = 31.6), i.e. a wrong *constant* in that pass - most likely a
+wrongly placed vertex-shader float constant (a one-register shift picks up a 1/32 scale from
+a neighbouring slot). Confirming it needs one artifact frame captured while the instrumented
+build is logging the constants of the scene draws.
+
+Detector lesson: the first "hit" was a LOADING screen (bright wordmark, black below), not the
+artifact. Any rule of the form "nothing below the band" also rejects the real artifact, which
+keeps its logo and PRESS bar. The collector therefore saves *candidates* for review instead
+of deciding.
+
+Also observed: cutscenes can stall - one frame (a green-lit building) stayed pixel-identical
+with a constant 250 draws for over four minutes while swaps kept happening. Separate issue
+from the strip, recorded here because it blocks driving the game by script.
+
+### 2026-11-03: what the screenshots actually show, and one dead end
+
+The user's frames settle the *shape* of the bug: within one attract/in-level sequence the
+same frame is sometimes fully rendered, sometimes black, sometimes a thin band - always with
+a correct HUD. That alternation rules out a projection/constant error (a wrong matrix would
+be consistently wrong) and points at the copy that brings the 3D pass into the presented
+buffer: it sometimes runs, sometimes not, sometimes only partly.
+
+Dead end measured today: `direct_host_resolve` (default true) looked like a match, because
+`TryResolveCopyDirectly` can complete for a region it did not fully write. It is not
+reachable in this build: run.sh forces REX_RENDER_TARGET_PATH_VULKAN=fsi, so
+GetPath() != kHostRenderTargets and the direct path is skipped entirely. Confirmed by
+measurement - 29.8 fps default vs 29.9 with --direct_host_resolve=false, i.e. no work
+changed. Keep that flag out of the launcher; it buys nothing here.
+
+Consequence: on the FSI path the resolve is a compute dispatch reading edram_buffer_, whose
+contents are written by fragment-shader interlock, and run.sh already notes this game's
+EDRAM aliasing breaks the host path outright. The next instrument to add is EDRAM range
+coverage per resolve (base, row length, rows) cross-referenced with which render target
+actually received the draws - if two targets alias the same EDRAM rows and alternate per
+frame, the black/partial/good cycle follows directly.
+
+Also: the title attract loop did not reproduce the fault in ~4 minutes of sampling, so the
+only reliable reproducer is real gameplay.
+
+### 2026-11-03 (2): the copy is never skipped - measured over a real play session
+
+Added undeduplicated front-buffer resolve logging (SD360FB, one line per copy into
+0x04445000) plus the per-frame draw counter. A play session that loaded into a level and
+reached 1,602 draws per frame produced:
+
+    frames=6440  front-buffer copies=6440  avg=1.000
+    dlen histogram: 2867200 x 6439   (1120x640x4, the full frame)
+    frames with ZERO copies: 1  <- the final frame, i.e. the game being closed
+
+So the scene is never skipped and never truncated, and there are no clear-only resolves at
+all (0 of 73,058). The front buffer is also a single fixed address across 57,099 swaps, so
+there is no double buffering to present the wrong half of. The HUD lives in that same buffer
+and always survives, so the presented image is faithful: the 3D region of the framebuffer is
+genuinely empty on the bad frames. The remaining suspect is therefore how much of EDRAM a
+render target is considered to own, not the copy.
+
+Patch 0004 output points at exactly that. height_used = min(rt_height, EstimateMaxY) flips
+constantly for the main 1120-wide target:
+
+    rt=2352 est=8192 used=2352   (whole EDRAM height for 14 tiles)
+    rt=2352 est=632  used=632    (the real frame height)
+
+est=8192 is EstimateMaxY's cap, reached when the estimator cannot bound the draws.
+EstimateMaxY is called with `interlock_barrier_only ? execute_unclipped_draw_vs_on_cpu_... :
+true`, and that cvar already defaults to true, so passing it explicitly changes nothing
+(verified: used=2352 still dominates). Worth noting for the next step: on the interlock path
+the target is routinely treated as 2,352 rows tall when the frame is 632, which is precisely
+how a scene can be written outside the range the resolve reads back.
+
+Also re-confirmed: the shm file (/dev/shm/xenia_memory_*, 0x120001000 bytes) maps guest
+addresses identity - the XEX image sits at 0x82000000 with an MZ header - but the front
+buffer address 0x04445000 reads as zeros both directly and at the +0x80000000 mirror, so it
+cannot be used to inspect the framebuffer from outside the process.

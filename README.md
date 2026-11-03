@@ -52,6 +52,35 @@ cmake --build --preset linux-amd64-debug --target sd360_codegen
 cmake --build --preset linux-amd64-debug
 ```
 
+## Shaders
+
+ReXGlue translates the game's Xenos shader microcode to SPIR-V at runtime, and
+the translator can dump each shader's ucode plus a readable disassembly:
+
+```bash
+./dump-shaders.sh            # writes logs/shaders-dump
+```
+
+See `docs/shaders.md` for the file naming, how the hashes map to the runtime
+debug log, and why `num_format` / `exp_adjust` have to be read from the fetch
+constant rather than from the shader itself.
+
+## PC controls
+
+Keyboard and mouse bindings are built into the binary (`sd360/src/pc_controls.h`),
+so no config file is needed. The defaults follow the 2010 PC port: WASD + mouse
+look, LMB fast attack, RMB web zip (tap) / web swing (hold), Space jump, Enter
+select, Esc pause. Bindings the PC documentation does not spell out are marked
+as guesses in that header.
+
+Override any binding on the command line, e.g.
+
+```bash
+./run.sh --keybind_y=RMB --mnk_sensitivity=1.4
+```
+
+or persistently with a `REX_KEYBIND_Y=RMB` environment variable.
+
 Unresolved functions at codegen are expected. The pipeline reports them as validation errors; `--force` generates output anyway so you can work through them incrementally.
 
 ## Workflow

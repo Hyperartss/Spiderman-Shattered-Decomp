@@ -1,0 +1,117 @@
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 001f36b..130e204 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -1,3 +1,5 @@
++#include <cstdio>
++#include <ctime>
+ /**
+  ******************************************************************************
+  * Xenia : Xbox 360 Emulator Research Project                                 *
+@@ -51,6 +53,13 @@ REXCVAR_DEFINE_BOOL(vulkan_readback_resolve, false, "GPU/Vulkan",
+                     "Read render-to-texture results on the CPU")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(sd360_draw_dump, false, "GPU/Vulkan",
++                    "Log each distinct combination of per-draw viewport, "
++                    "scissor, render target and shader state (SD360 diagnostics)");
++
++// SD360 diagnostic: draws issued since the last swap.
++static long sd360_frame_draws = 0;
++
+ REXCVAR_DEFINE_BOOL(vulkan_readback_memexport, false, "GPU/Vulkan",
+                     "Read data written by memory export in shaders on the CPU")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -2271,6 +2280,16 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+ 
+ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                                        uint32_t frontbuffer_height) {
++  {
++    static long sd360_frame = 0;
++    ++sd360_frame;
++    std::fprintf(stderr, "SD360FRAME t=%ld n=%ld fb=%u %ux%u draws=%ld\n",
++                 (long)std::time(nullptr), sd360_frame, frontbuffer_ptr,
++                 frontbuffer_width, frontbuffer_height, sd360_frame_draws);
++    sd360_frame_draws = 0;
++    std::fflush(stderr);
++  }
++
+   SCOPE_profile_cpu_f("gpu");
+   vertex_buffers_in_sync_[0] = 0;
+   vertex_buffers_in_sync_[1] = 0;
+@@ -3596,6 +3615,75 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+ 
+   const RegisterFile& regs = *register_file_;
+   (void)index_buffer_info;
++  ++sd360_frame_draws;
++  // SD360 diagnostic: log each *distinct* combination of the per-draw viewport,
++  // scissor, render target and shader state once, with the draw index where it
++  // was first seen. Bounded (48 states) so a whole session fits in the log,
++  // which makes states that only appear in some scenes - for example specific
++  // dimensions - stand out.
++  if (REXCVAR_GET(sd360_draw_dump)) {
++    static long sd360_draw_total = 0;
++    ++sd360_draw_total;
++    struct Sd360State {
++      float vsx, vsy, vox, voy;
++      uint32_t tlx, tly, brx, bry, pitch, msaa, fmt, cbase, dbase;
++      uint64_t vshash, pshash;
++    };
++    static constexpr int kSd360MaxStates = 4096;
++    static Sd360State sd360_states[kSd360MaxStates];
++    static int sd360_state_count = 0;
++    auto sd360_surface = regs.Get<reg::RB_SURFACE_INFO>();
++    auto sd360_scissor_tl = regs.Get<reg::PA_SC_WINDOW_SCISSOR_TL>();
++    auto sd360_scissor_br = regs.Get<reg::PA_SC_WINDOW_SCISSOR_BR>();
++    Sd360State sd360_now;
++    sd360_now.vsx = regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE);
++    sd360_now.vsy = regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE);
++    sd360_now.vox = regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET);
++    sd360_now.voy = regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET);
++    sd360_now.tlx = uint32_t(sd360_scissor_tl.tl_x);
++    sd360_now.tly = uint32_t(sd360_scissor_tl.tl_y);
++    sd360_now.brx = uint32_t(sd360_scissor_br.br_x);
++    sd360_now.bry = uint32_t(sd360_scissor_br.br_y);
++    sd360_now.pitch = uint32_t(sd360_surface.surface_pitch);
++    sd360_now.msaa = uint32_t(sd360_surface.msaa_samples);
++    sd360_now.fmt = uint32_t(regs.Get<reg::RB_COLOR_INFO>().color_format);
++    auto sd360_color_info = regs.Get<reg::RB_COLOR_INFO>();
++    auto sd360_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
++    sd360_now.cbase = uint32_t(sd360_color_info.color_base) |
++                      (uint32_t(sd360_color_info.color_base_bit_11) << 11);
++    sd360_now.dbase = uint32_t(sd360_depth_info.depth_base) |
++                      (uint32_t(sd360_depth_info.depth_base_bit_11) << 11);
++    const Shader* sd360_vs = active_vertex_shader();
++    const Shader* sd360_ps = active_pixel_shader();
++    sd360_now.vshash = sd360_vs ? sd360_vs->ucode_data_hash() : 0;
++    sd360_now.pshash = sd360_ps ? sd360_ps->ucode_data_hash() : 0;
++    bool sd360_seen = false;
++    for (int i = 0; i < sd360_state_count; ++i) {
++      const Sd360State& s = sd360_states[i];
++      if (s.vsx == sd360_now.vsx && s.vsy == sd360_now.vsy && s.vox == sd360_now.vox &&
++          s.voy == sd360_now.voy && s.tlx == sd360_now.tlx && s.tly == sd360_now.tly &&
++          s.brx == sd360_now.brx && s.bry == sd360_now.bry &&
++          s.pitch == sd360_now.pitch && s.msaa == sd360_now.msaa &&
++          s.fmt == sd360_now.fmt && s.cbase == sd360_now.cbase &&
++          s.dbase == sd360_now.dbase && s.vshash == sd360_now.vshash &&
++          s.pshash == sd360_now.pshash) {
++        sd360_seen = true;
++        break;
++      }
++    }
++    if (!sd360_seen && sd360_state_count < kSd360MaxStates) {
++      sd360_states[sd360_state_count++] = sd360_now;
++      REXLOG_WARN(
++          "SD360STATE #{} draw={} prim={} pitch={} msaa={} color_format={} "
++          "vport_scale=({},{}) vport_offset=({},{}) scissor=({},{})-({},{}) "
++          "vs={:016X} ps={:016X} cbase={} dbase={}",
++          sd360_state_count, sd360_draw_total, uint32_t(prim_type),
++          sd360_now.pitch, sd360_now.msaa, sd360_now.fmt,
++          sd360_now.vsx, sd360_now.vsy, sd360_now.vox, sd360_now.voy,
++          sd360_now.tlx, sd360_now.tly, sd360_now.brx, sd360_now.bry,
++          sd360_now.vshash, sd360_now.pshash, sd360_now.cbase, sd360_now.dbase);
++    }
++  }
+   auto draw_fail = [&](const char* stage) {
+     auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+     REXGPU_ERROR(

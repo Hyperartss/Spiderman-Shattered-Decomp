@@ -17,6 +17,8 @@
 #include <string>
 #include <thread>
 
+#include "pc_controls.h"
+
 class Sd360App : public rex::ReXApp {
  public:
   using rex::ReXApp::ReXApp;
@@ -33,6 +35,11 @@ class Sd360App : public rex::ReXApp {
   void OnPreSetup(rex::RuntimeConfig& config) override {
     config.gpu_plugin = "xenos";
   }
+
+  // Install the built-in keyboard + mouse layout (src/pc_controls.h). This runs
+  // after cvar init, so an explicit config file / REX_* variable / --flag is
+  // already visible and is left alone; only defaults are filled in.
+  void OnPostSetup() override { sd360::pc_controls::Apply(); }
 
   // Note: setting vulkan_async_skip_incomplete_frames from
 // rex::cvar::SetFlagByName in this hook has no effect -- the flag is still read
@@ -85,6 +92,30 @@ class Sd360App : public rex::ReXApp {
             }
           }
           if (f) std::fclose(f);
+          // SD360_CAPTURE_FRONT=1: also dump the guest front buffer itself
+          // (0x04445000, 1120x640, 4 bytes per pixel) at 1/4 size. Capturing
+          // this and the presenter's guest output at the same timestamp
+          // separates "the game drew a wrong image" from "the copy of the
+          // front buffer into the host image is wrong".
+          if (const char* fe = std::getenv("SD360_CAPTURE_FRONT"); fe && *fe) {
+            constexpr uint32_t kFw = 1120, kFh = 640;
+            const auto* fb =
+                reinterpret_cast<const uint8_t*>(0x100000000ull + 0x04445000ull);
+            const uint32_t fw = kFw / 4, fh = kFh / 4;
+            std::string fpath = capture_dir_ + "/front_" + std::to_string(t) + ".ppm";
+            if (FILE* ff = std::fopen(fpath.c_str(), "wb")) {
+              std::fprintf(ff, "P6\n%u %u\n255\n", fw, fh);
+              for (uint32_t yy = 0; yy < fh; ++yy) {
+                const uint8_t* frow = fb + size_t(yy * 4) * kFw * 4;
+                for (uint32_t xx = 0; xx < fw; ++xx) {
+                  const uint8_t* q = frow + size_t(xx * 4) * 4;
+                  const uint8_t rgb[3] = {q[2], q[1], q[0]};
+                  std::fwrite(rgb, 1, 3, ff);
+                }
+              }
+              std::fclose(ff);
+            }
+          }
           if (lumlog) {
             std::fprintf(lumlog, "%ld %.1f", t, n ? double(sum) / n : 0.0);
             // SD360_PEEK=addr,addr,... (guest physical, hex): log the first
